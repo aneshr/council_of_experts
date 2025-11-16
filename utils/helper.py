@@ -11,6 +11,13 @@ from langchain.chains import LLMChain
 from langchain_google_genai import ChatGoogleGenerativeAI
 from streamlit_mic_recorder import mic_recorder
 
+def init_credentials():
+    os.environ["GOOGLE_API_KEY"] = ""
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/Users/aneesh/Work/chat_app/speech.json"
+
+def play_audio_blocking(path: str):
+    os.system(f'afplay "{path}"')
+
 def initialize_llm(model_name="gemini-2.0-flash",temperature=0.5):
     llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash",temperature=temperature)
     
@@ -69,6 +76,8 @@ def chat_expert_1(llm,expertise,question,chat_history):
 
     chain = promptT | llm
 
+    return chain
+
     response = st.write_stream(stream_llm_response(chain,question,chat_history))
     with st.spinner("Generating Speech..."):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
@@ -89,7 +98,7 @@ def chat_expert_2(llm,expertise,question,chat_history):
         ))
 
     chain = promptT | llm
-
+    return chain
     response = st.write_stream(stream_llm_response(chain,question,chat_history))
     
     return response
@@ -105,6 +114,8 @@ def chat_expert_3(llm,expertise,question,chat_history):
         ))
 
     chain = promptT | llm
+
+    return chain
 
     response = st.write_stream(stream_llm_response(chain,question,chat_history))
 
@@ -125,6 +136,8 @@ def summarizer(llm,question,chat_history,expert1,expert2,expert3):
         ))
 
     chain = promptT | llm
+    return chain
+
     response = st.write_stream(stream_llm_response(chain,question,chat_history))
 
     return response

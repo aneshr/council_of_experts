@@ -13,6 +13,7 @@ from streamlit_mic_recorder import mic_recorder
 import base64
 
 from TTS.api import TTS
+
 os.environ["GOOGLE_API_KEY"] = ""
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/Users/aneesh/Work/chat_app/speech.json"
 if "temperature" not in st.session_state:
@@ -199,7 +200,7 @@ for message in st.session_state.messages:
 
 
 model = whisper.load_model("base")
-client = speech.SpeechClient()
+#client = speech.SpeechClient()
 if audio_data and "bytes" in audio_data and audio_data["bytes"]:
     # Play the recorded audio
     # st.audio(audio_data["bytes"])

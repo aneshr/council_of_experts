@@ -1,11 +1,11 @@
 # app/main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routes import chat#, health
+from app.routes import chat#, health
 import os
 #from app.lifecycles.py import lifespan
 
-os.environ["GOOGLE_API_KEY"] = ""
+os.environ["GOOGLE_API_KEY"] = "AIzaSyCWtb1Al9r8LtGxn-2stZvUBL732wGWwTM"
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/Users/aneesh/Work/chat_app/speech.json"
 
 app = FastAPI(
