@@ -4,23 +4,20 @@ import random
 import os
 import whisper
 import tempfile
-from langchain_openai import ChatOpenAI
-from google.cloud import speech
+from langchain_community.chat_models import ChatOllama
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from langchain_google_genai import ChatGoogleGenerativeAI
 from streamlit_mic_recorder import mic_recorder
 
-def init_credentials():
-    os.environ["GOOGLE_API_KEY"] = ""
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/Users/aneesh/Work/chat_app/speech.json"
-
 def play_audio_blocking(path: str):
     os.system(f'afplay "{path}"')
 
-def initialize_llm(model_name="gemini-2.0-flash",temperature=0.5):
-    llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash",temperature=temperature)
-    
+def initialize_llm(model_name="gemma2:2b"):
+    llm = ChatOllama(
+        model=model_name,
+        base_url="http://localhost:11434"
+    )
     return llm
 
 def format_chat_history(history):
@@ -55,12 +52,41 @@ def stream_llm_response(chain,question,history):
     return response
 
 
-def llm_response(chain, question, history):
+def llm_response(chain, question):
     # Get the full response from the chain at once
-    result = chain.invoke({"chat_history": history, "question": question})
+    result = chain.invoke({"question": question})
     
     # Return the complete content (no yield)
     return result.content
+
+def router_expert(llm,expert_list,question):
+    promptT = PromptTemplate(
+    input_variables=["question"],
+        template=(
+            f"""
+                You are an expert router.
+
+                Your task is to choose the SINGLE most relevant expert to answer the user’s question.
+
+                Available experts:
+                {expert_list}
+
+                Rules:
+                - Choose exactly ONE expert.
+                - Return ONLY the expert name.
+                - Do NOT explain your choice.
+                - Do NOT add punctuation or extra words.
+                - If the question spans multiple domains, choose the PRIMARY one.
+                - If uncertain, choose first expert.
+
+                User question:
+                {question}
+                """
+                ))
+
+    chain = promptT | llm
+
+    return chain
 
 
 def chat_expert_1(llm,expertise,question,chat_history):
@@ -68,24 +94,25 @@ def chat_expert_1(llm,expertise,question,chat_history):
     input_variables=["chat_history", "question"],
         template=(
             f"You are an expert in {expertise}.\n"
-            "Here is the conversation so far, check if any other Expert made any points else you are the first expert to answer:\n"
+            "Here is the conversation so far:\n"
             "{chat_history}\n\n"
             "User: {question}\n"
-            f"{expertise} Expert:"
+            "Answer the user's question directly.\n"
+            
         ))
 
     chain = promptT | llm
 
     return chain
 
-    response = st.write_stream(stream_llm_response(chain,question,chat_history))
-    with st.spinner("Generating Speech..."):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
-            temp_path = f.name
-        tts.tts_to_file(text=response, file_path=temp_path)
-        st.audio(temp_path)
-        play_audio_blocking(temp_path)
-    return response
+    # response = st.write_stream(stream_llm_response(chain,question,chat_history))
+    # with st.spinner("Generating Speech..."):
+    #     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+    #         temp_path = f.name
+    #     tts.tts_to_file(text=response, file_path=temp_path)
+    #     st.audio(temp_path)
+    #     play_audio_blocking(temp_path)
+    # return response
 
 def chat_expert_2(llm,expertise,question,chat_history):
     promptT = PromptTemplate(
@@ -94,7 +121,9 @@ def chat_expert_2(llm,expertise,question,chat_history):
             f"You are an expert in {expertise}.\n"
             "Here is the conversation so far:\n"
             "{chat_history}\n\n"
-            f"{expertise} Expert:"
+            "User: {question}\n"
+            "Answer the user's question directly.\n"
+            
         ))
 
     chain = promptT | llm
@@ -110,7 +139,9 @@ def chat_expert_3(llm,expertise,question,chat_history):
             f"You are an expert in {expertise}.\n"
             "Here is the conversation so far:\n"
             "{chat_history}\n\n"
-            f"{expertise} Expert:"
+            "User: {question}\n"
+            "Answer the user's question directly.\n"
+            
         ))
 
     chain = promptT | llm
