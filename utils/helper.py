@@ -21,18 +21,34 @@ def initialize_llm(model_name="gemma2:2b"):
     return llm
 
 def format_chat_history(history):
-    """Format history list into a readable string"""
-    #return "\n".join([f"User: {u}\nAssistant: {a}" for u, a in history])
-    history_string = ""
-    user = True
+    """Format chat history into a readable string (robust version)."""
+    lines = []
+
     for item in history:
-        if user:
-            history_string += f"User: {item['content']}\n"
-            user = False
-        else:
-            history_string += f"Assistant: {item['content']}\n"
-            user = True
-    return history_string
+        # handle both dicts and objects
+        role = getattr(item, "role", None)
+        content = getattr(item, "content", None)
+
+        # fallback if it's a dict
+        if role is None and isinstance(item, dict):
+            role = item.get("role")
+            content = item.get("content")
+
+        if not content:
+            continue
+
+        role_lower = role.lower() if role else ""
+
+        if role_lower == "user":
+            lines.append(f"User: {content}")
+        elif role_lower == "assistant":
+            lines.append(f"Assistant: {content}")
+        elif role_lower == "system":
+            lines.append(f"System: {content}")
+
+    return "\n".join(lines)
+
+
 
 
 def stream_llm_response(chain,question,history):
@@ -44,7 +60,7 @@ def stream_llm_response(chain,question,history):
         Helps to stream LLM response and also returns a full response.
     '''
     response = ""
-    for chunk in chain.stream({"chat_history":history,"question":question}):
+    for chunk in chain.stream({"chat_history":format_chat_history(history),"question":question}):
         response += chunk.content
         yield chunk.content
         time.sleep(0.05)
