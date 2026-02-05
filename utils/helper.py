@@ -1,5 +1,15 @@
+"""
+Utility helpers used by the FastAPI backend.
+
+Responsibilities of this module:
+- Initialize the LLM client (Ollama in this case).
+- Format chat history into a single string for prompts.
+- Build expert-specific prompt chains.
+- Stream responses from the LLM token by token.
+"""
+
 import time
-import time
+import time  # duplicate import is harmless; kept to avoid non‑comment refactors
 import random
 import os
 import whisper
@@ -10,18 +20,45 @@ from langchain.chains import LLMChain
 from langchain_google_genai import ChatGoogleGenerativeAI
 from streamlit_mic_recorder import mic_recorder
 
+
 def play_audio_blocking(path: str):
+    """
+    Play an audio file synchronously using the system `afplay` command.
+
+    Parameters
+    ----------
+    path : str
+        Path to the audio file that should be played.
+    """
     os.system(f'afplay "{path}"')
 
+
 def initialize_llm(model_name="gemma2:2b"):
+    """
+    Initialize and return a ChatOllama client that talks to a local Ollama
+    server.
+
+    Parameters
+    ----------
+    model_name : str, optional
+        Name of the Ollama model to use, by default "gemma2:2b".
+    """
     llm = ChatOllama(
         model=model_name,
         base_url="http://localhost:11434"
     )
     return llm
 
+
 def format_chat_history(history):
-    """Format chat history into a readable string (robust version)."""
+    """
+    Format chat history into a readable string (robust version).
+
+    The function is defensive and supports:
+    - Pydantic / object-style messages (with `.role` and `.content` attrs).
+    - Dict-style messages (with "role" and "content" keys).
+    - Skips empty messages.
+    """
     lines = []
 
     for item in history:
@@ -35,6 +72,7 @@ def format_chat_history(history):
             content = item.get("content")
 
         if not content:
+            # ignore messages without content
             continue
 
         role_lower = role.lower() if role else ""
@@ -52,13 +90,19 @@ def format_chat_history(history):
 
 
 def stream_llm_response(chain,question,history):
-    '''
-        chain : 
-        question :
-        history: 
+    """
+    Stream LLM response tokens while also collecting the full response.
 
-        Helps to stream LLM response and also returns a full response.
-    '''
+    Parameters
+    ----------
+    chain :
+        LangChain runnable (PromptTemplate | llm) that supports `.stream`
+        and expects `chat_history` and `question` as inputs.
+    question : str
+        Current user question.
+    history : list
+        Previous conversation messages to be formatted into `chat_history`.
+    """
     response = ""
     for chunk in chain.stream({"chat_history":format_chat_history(history),"question":question}):
         response += chunk.content
@@ -69,13 +113,20 @@ def stream_llm_response(chain,question,history):
 
 
 def llm_response(chain, question):
-    # Get the full response from the chain at once
+    """
+    Get the full response from the chain at once (non‑streaming helper).
+    """
     result = chain.invoke({"question": question})
     
     # Return the complete content (no yield)
     return result.content
 
 def router_expert(llm,expert_list,question):
+    """
+    Build a routing chain that selects the best expert for a given question.
+
+    The chain, when invoked, should return ONLY the name of the chosen expert.
+    """
     promptT = PromptTemplate(
     input_variables=["question"],
         template=(
@@ -106,6 +157,11 @@ def router_expert(llm,expert_list,question):
 
 
 def chat_expert_1(llm,expertise,question,chat_history):
+    """
+    Create a chain that answers as Expert 1.
+
+    `expertise` is a human‑readable domain name (e.g. "Science").
+    """
     promptT = PromptTemplate(
     input_variables=["chat_history", "question"],
         template=(
@@ -131,6 +187,12 @@ def chat_expert_1(llm,expertise,question,chat_history):
     # return response
 
 def chat_expert_2(llm,expertise,question,chat_history):
+    """
+    Create a chain that answers as Expert 2.
+
+    This is structurally similar to `chat_expert_1`, but separated so you
+    can easily customize prompts per expert.
+    """
     promptT = PromptTemplate(
     input_variables=["chat_history", "question"],
         template=(
@@ -144,11 +206,14 @@ def chat_expert_2(llm,expertise,question,chat_history):
 
     chain = promptT | llm
     return chain
-    response = st.write_stream(stream_llm_response(chain,question,chat_history))
-    
-    return response
+
 
 def chat_expert_3(llm,expertise,question,chat_history):
+    """
+    Create a chain that answers as Expert 3.
+
+    Currently mirrors the structure of Expert 1 and 2.
+    """
     promptT = PromptTemplate(
     input_variables=["chat_history", "question"],
         template=(
@@ -164,11 +229,14 @@ def chat_expert_3(llm,expertise,question,chat_history):
 
     return chain
 
-    response = st.write_stream(stream_llm_response(chain,question,chat_history))
-
-    return response
 
 def summarizer(llm,question,chat_history,expert1,expert2,expert3):
+    """
+    Create a summarization chain that:
+    - Reads the whole conversation.
+    - Mentions what each expert contributed.
+    - Produces a concise answer (< 20 words).
+    """
     promptT = PromptTemplate(
     input_variables=["chat_history", "question"],
         template=(
@@ -185,11 +253,13 @@ def summarizer(llm,question,chat_history,expert1,expert2,expert3):
     chain = promptT | llm
     return chain
 
-    response = st.write_stream(stream_llm_response(chain,question,chat_history))
-
-    return response
-
 
 def initiaize_whisper():
+    """
+    Initialize and return the base Whisper ASR model.
+
+    NOTE: function name is intentionally kept as‑is to avoid changing call
+    sites; only documentation has been added.
+    """
     model = whisper.load_model("base")
     return model
