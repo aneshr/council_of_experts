@@ -1,0 +1,4 @@
+#Link for understanding or studying RAG
+
+https://github.com/langchain-ai/rag-from-scratch
+

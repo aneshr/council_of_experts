@@ -8,7 +8,8 @@ This router exposes endpoints for:
   * Streams the expert's LLM response back to the client as JSON lines.
 """
 
-from fastapi import APIRouter, Request
+
+from fastapi import APIRouter, Request, UploadFile, File, Form
 import time
 from fastapi.responses import StreamingResponse
 from utils.helper import stream_llm_response
@@ -21,10 +22,13 @@ from utils.helper import (
     initialize_llm,
     router_expert,
     llm_response,
+    convert_to_wav,
+    initialize_whisper,
 )
 from models.chat_models import ChatRequest
 import json
-
+import os
+print("Chat routes file:",__file__)
 # Router configuration – all routes in this module will be mounted under /ask.
 router = APIRouter(
     prefix="/ask",          # All routes here start with /ask
@@ -134,4 +138,79 @@ async def stream_chat(request: ChatRequest):
 
     # StreamingResponse ensures the HTTP connection stays open while
     # `generate()` yields chunks.
+    return StreamingResponse(generate(), media_type="text/plain")
+
+
+@router.post("/voice-query")
+async def voice_query(audio: UploadFile = File(...), meta: str = Form(...)):
+    """
+    Voice query endpoint – accepts recorded audio plus metadata, transcribes
+    the audio to text, routes the query to the best expert, and streams the
+    expert's response back to the client.
+
+    Frontend example (FormData):
+        formData.append("audio", audioBlob, "query.webm");
+        formData.append(
+            "meta",
+            JSON.stringify({
+              history: llmHistory,
+              expert1: experts.expert1,
+              expert2: experts.expert2,
+              expert3: experts.expert3
+            })
+        );
+    """
+    # Get the raw audio bytes and metadata from the request
+    audio_bytes = audio.file.read()
+    meta = json.loads(meta)
+
+    # Always convert the uploaded audio to a proper WAV file on disk.
+    # `convert_to_wav` returns the path to a temporary WAV file.
+    wav_path = convert_to_wav(audio_bytes)
+    
+    # Transcribe the audio from the WAV file
+    whisper_model = initialize_whisper()
+    segments = whisper_model.transcribe(audio=wav_path, language="en", beam_size=5)
+    print("segments:", segments)
+    prompt = segments["text"]
+    # import llm
+    llm = initialize_llm()
+    # Get the expert from the router
+    expert_list = [meta["expert1"], meta["expert2"], meta["expert3"]]
+    expert = get_expert_from_router(llm, prompt, expert_list)
+    print(expert)
+    
+    # Build the expert chain
+    expert_chain = {
+        expert: chat_expert_1(llm, expert, prompt, meta["history"])
+    }
+    
+    # Stream the expert response (same JSON-lines format as /stream)
+    def generate():
+        # First send the transcribed text so the frontend can display the
+        # actual user question instead of a generic \"Voice question\" label.
+        yield json.dumps(
+            {
+                "event": "transcript",
+                "content": prompt,
+            }
+        ) + "\n"
+
+        # Then stream the expert's answer as normal.
+        for expert, chain in expert_chain.items():
+            if expert == "None":
+                continue
+            for chunk in stream_llm_response(chain, prompt, meta["history"]):
+                yield json.dumps(
+                    { 
+                        "expert": expert,
+                        "content": chunk,
+                    }
+                ) + "\n"
+            yield json.dumps(
+                {
+                    "expert": expert,
+                    "event": "end",
+                }
+            ) + "\n"
     return StreamingResponse(generate(), media_type="text/plain")

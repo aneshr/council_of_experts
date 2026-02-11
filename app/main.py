@@ -10,16 +10,8 @@ route modules (such as the chat router).
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routes import chat  # , health
-import os
-from fastapi.middleware.cors import CORSMiddleware
 
 # from app.lifecycles import lifespan   # Example of how a lifespan handler could be wired
-
-# Configure environment variables required by external providers.
-# NOTE: these are hard-coded here for now, but in production they should
-# come from real environment variables or a secrets manager.
-os.environ["GOOGLE_API_KEY"] = "AIzaSyAH5plGdqsKKlipkZ_1VSgi7-YRsZ3S5ak"
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/Users/aneesh/Work/chat_app/speech.json"
 
 # Create the main FastAPI application instance.
 app = FastAPI(

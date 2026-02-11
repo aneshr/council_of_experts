@@ -16,9 +16,11 @@ import whisper
 import tempfile
 from langchain_community.chat_models import ChatOllama
 from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain_google_genai import ChatGoogleGenerativeAI
-from streamlit_mic_recorder import mic_recorder
+from pydub import AudioSegment
+
+
+# Lazy‑initialized global Whisper model so it is loaded only once
+_WHISPER_MODEL = None
 
 
 def play_audio_blocking(path: str):
@@ -49,6 +51,35 @@ def initialize_llm(model_name="gemma2:2b"):
     )
     return llm
 
+def initialize_whisper():
+    """
+    Initialize and return the small Whisper ASR model.
+
+    The model is cached at module level so it is loaded only once, which
+    significantly improves performance for repeated voice queries.
+    """
+    global _WHISPER_MODEL
+    if _WHISPER_MODEL is None:
+        _WHISPER_MODEL = whisper.load_model("small")
+    return _WHISPER_MODEL
+
+
+def convert_to_wav(audio_bytes: bytes) -> str:
+    """
+    Convert raw audio bytes to a temporary `.wav` file and return its path.
+
+    This helper:
+    - Writes the incoming bytes to a temp file.
+    - Uses `pydub` to decode and re‑encode as proper WAV.
+    - Returns the filesystem path to the WAV file.
+    """
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        tmp.write(audio_bytes)
+        temp_path = tmp.name
+
+    audio = AudioSegment.from_file(temp_path)
+    audio.export(temp_path, format="wav")
+    return temp_path
 
 def format_chat_history(history):
     """
