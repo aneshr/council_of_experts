@@ -20,19 +20,13 @@ app = FastAPI(
     # lifespan=lifespan,  # ensures one-time init/cleanup if used
 )
 
-# CORS middleware to allow the React frontend (running on Vite dev server).
+# CORS middleware.
+# NOTE: You **cannot** use allow_credentials=True with a wildcard ("*") origin.
+# For development, we explicitly allow the Vite dev server; for production,
+# extend this list with your real frontend domains.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# A second, broader CORS configuration – currently allows all origins.
-# In a real deployment you would likely restrict this to trusted domains.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # tighten in prod
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -6,10 +6,13 @@ This router exposes endpoints for:
 - A streaming chat endpoint at `/ask/stream` that:
   * Routes a question to the most relevant expert.
   * Streams the expert's LLM response back to the client as JSON lines.
+- A BYOD ingestion endpoint at `/ask/byod` that:
+  * Accepts document uploads and metadata.
+  * Extracts, chunks, and indexes text into a global FAISS store.
 """
 
 
-from fastapi import APIRouter, Request, UploadFile, File, Form
+from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException
 import time
 from fastapi.responses import StreamingResponse
 from utils.helper import stream_llm_response
@@ -24,8 +27,10 @@ from utils.helper import (
     llm_response,
     convert_to_wav,
     initialize_whisper,
+    format_chat_history,
 )
 from models.chat_models import ChatRequest
+from utils.rag import ingest_document, retrieve_context
 import json
 import os
 print("Chat routes file:",__file__)
@@ -214,3 +219,170 @@ async def voice_query(audio: UploadFile = File(...), meta: str = Form(...)):
                 }
             ) + "\n"
     return StreamingResponse(generate(), media_type="text/plain")
+
+@router.post("/byod")
+async def byod(
+    file: UploadFile = File(...),
+    doc_name: str | None = Form(None),
+    source: str = Form("upload"),
+    tags: str | None = Form(None),
+    description: str | None = Form(None),
+    language: str = Form("en"),
+):
+    """
+    BYOD ingestion endpoint.
+
+    Accepts a single uploaded file plus optional metadata, extracts text,
+    chunks it, embeds with a local Ollama embedding model, and upserts
+    into a global FAISS index.
+
+    Request (multipart/form-data):
+    - file: UploadFile (required)
+    - doc_name: str (optional)
+    - source: str (optional, default "upload")
+    - tags: str (optional; comma-separated list or JSON array)
+    - description: str (optional)
+    - language: str (optional, default "en")
+    """
+    try:
+        file_bytes = await file.read()
+        if not file_bytes:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+        # Parse tags: allow either JSON array or comma-separated string.
+        parsed_tags = []
+        if tags:
+            import json
+
+            raw = tags.strip()
+            if raw:
+                try:
+                    maybe_list = json.loads(raw)
+                    if isinstance(maybe_list, list):
+                        parsed_tags = [str(t) for t in maybe_list]
+                    else:
+                        parsed_tags = [str(maybe_list)]
+                except json.JSONDecodeError:
+                    parsed_tags = [t.strip() for t in raw.split(",") if t.strip()]
+
+        summary = ingest_document(
+            file_bytes=file_bytes,
+            filename=file.filename,
+            doc_name=doc_name,
+            source=source,
+            tags=parsed_tags,
+            description=description,
+            language=language,
+        )
+
+        return summary
+
+    except ValueError as e:
+        # Validation / unsupported types / empty text, etc.
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        # Re-raise FastAPI HTTPExceptions unchanged.
+        raise
+    except Exception as e:
+        # Unexpected errors – avoid leaking internals.
+        print("Error in /ask/byod:", e)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to ingest document. Please try again later.",
+        )
+
+
+@router.post("/byod-chat")
+async def byod_chat(request: ChatRequest):
+    """
+    RAG-aware chat endpoint over ingested BYOD documents.
+
+    Reuses the ChatRequest model:
+    - question: str
+    - history: List[Message]
+
+    Flow:
+    1. Retrieve top-k relevant chunks from FAISS.
+    2. Build a RAG prompt using those chunks + chat history.
+    3. Stream the answer back as newline-delimited JSON lines:
+       {"content": "<chunk>"} ... {"event": "end"}
+    """
+    question = request.question
+    history = request.history or []
+
+    try:
+        # Step 1: retrieve relevant context from FAISS
+        docs = retrieve_context(question, k=5)
+
+        # Build a readable context block with simple citations.
+        context_parts = []
+        for i, d in enumerate(docs):
+            meta = d.metadata or {}
+            label = meta.get("doc_name") or meta.get("filename") or f"doc-{i+1}"
+            context_parts.append(
+                f"[{i+1}] ({label})\n{d.page_content.strip()}"
+            )
+        context_str = "\n\n---\n\n".join(context_parts)
+
+    except ValueError as e:
+        # No index or other retrieval issues – return a clear 400.
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("Error during RAG retrieval:", e)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to retrieve context from the document index.",
+        )
+
+    # Step 2: build a simple RAG prompt chain.
+    llm = initialize_llm()
+
+    from langchain.prompts import PromptTemplate
+
+    promptT = PromptTemplate(
+        input_variables=["chat_history", "question", "context"],
+        template=(
+            "You are a helpful assistant answering questions based on the provided documents.\n"
+            "Use the document context as your PRIMARY source of truth.\n"
+            "If the answer is not clearly supported by the documents, say you don't know.\n\n"
+            "Document context:\n"
+            "{context}\n\n"
+            "Conversation so far:\n"
+            "{chat_history}\n\n"
+            "User: {question}\n"
+            "Assistant:"
+        ),
+    )
+
+    chain = promptT | llm
+
+    def generate():
+        """
+        Stream the RAG answer as newline-delimited JSON objects.
+        """
+        full_history = format_chat_history(history)
+        try:
+            for chunk in chain.stream(
+                {
+                    "chat_history": full_history,
+                    "question": question,
+                    "context": context_str,
+                }
+            ):
+                yield json.dumps({"content": chunk.content}) + "\n"
+
+            yield json.dumps({"event": "end"}) + "\n"
+        except Exception as e:
+            print("Error streaming RAG response:", e)
+            # Best-effort error notification to the client.
+            yield json.dumps(
+                {
+                    "event": "error",
+                    "detail": "Error while streaming RAG response.",
+                }
+            ) + "\n"
+
+    return StreamingResponse(generate(), media_type="text/plain")
+

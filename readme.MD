@@ -19,11 +19,16 @@ A FastAPI-based backend service that provides an intelligent chat interface with
 
 ## 🎯 Overview
 
-This FastAPI backend implements a multi-expert chat system where:
+This FastAPI backend implements:
 
-1. **User submits a question** → The system routes it to the most relevant expert using an LLM router
-2. **Expert generates response** → The chosen expert's LLM chain processes the question with conversation context
-3. **Response is streamed** → Tokens are sent back to the client in real-time as JSON lines
+1. A **multi-expert chat system** where:
+   - **User submits a question** → The system routes it to the most relevant expert using an LLM router.
+   - **Expert generates response** → The chosen expert's LLM chain processes the question with conversation context.
+   - **Response is streamed** → Tokens are sent back to the client in real-time as JSON lines.
+2. A **BYOD (Bring Your Own Data) RAG pipeline** where:
+   - Users upload documents via an ingestion endpoint (`/ask/byod`).
+   - Text is extracted, chunked, embedded with a local embedding model via Ollama, and stored in a **FAISS** vector index.
+   - A RAG chat endpoint (`/ask/byod-chat`) retrieves the most relevant chunks and streams **context-grounded answers**.
 
 The backend is designed to work with a React frontend (or any HTTP client) and supports streaming responses for a smooth user experience.
 
@@ -251,6 +256,80 @@ The endpoint returns a streaming response with `Content-Type: text/plain`. Each 
 {"expert": "Science", "event": "end"}
 ```
 
+### 3. BYOD Ingestion (RAG Index)
+
+**POST** `/api/v1/ask/byod`
+
+Ingest a user document into the global FAISS vector index for later retrieval.
+
+**Request (multipart/form-data):**
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/ask/byod" \
+  -H "Accept: application/json" \
+  -F "file=@/path/to/document.pdf" \
+  -F "doc_name=Interview Notes" \
+  -F "source=upload" \
+  -F "tags=[\"interview\",\"guide\"]" \
+  -F "description=My personal interview prep notes" \
+  -F "language=en"
+```
+
+**Supported file types (for now):**
+
+- `.txt`, `.md`
+- `.pdf` (via `PyPDF2`)
+- `.docx` (via `python-docx`)
+
+**Successful response:**
+
+```json
+{
+  "doc_id": "<uuid>",
+  "doc_name": "Interview Notes",
+  "filename": "document.pdf",
+  "file_type": "pdf",
+  "num_chunks": 24,
+  "tags": ["interview", "guide"],
+  "ingested_at": "2026-02-12T10:15:23Z"
+}
+```
+
+### 4. BYOD RAG Chat
+
+**POST** `/api/v1/ask/byod-chat`
+
+Ask a question against the documents you have ingested. This endpoint:
+
+- Loads the FAISS index.
+- Retrieves the top-k relevant chunks using semantic similarity.
+- Builds a RAG prompt with those chunks + chat history.
+- Streams back an answer grounded in the document context.
+
+**Request Body (same `ChatRequest` model):**
+
+```json
+{
+  "question": "What are the main topics I should prepare for this interview?",
+  "history": [],
+  "expert1": "None",
+  "expert2": "None",
+  "expert3": "None"
+}
+```
+
+**Response Format:**
+
+Newline-delimited JSON objects:
+
+```json
+{"content": "You should focus on ..."}
+{"content": " system design, "}
+{"content": " APIs, and "}
+{"content": " RAG architectures."}
+{"event": "end"}
+```
+
 **Response Fields:**
 - `expert` (string): Name of the expert generating the response
 - `content` (string): Token chunk from the LLM
@@ -312,13 +391,16 @@ chat_app/
 │   ├── main.py              # FastAPI app initialization, CORS config
 │   └── routes/
 │       ├── __init__.py
-│       └── chat.py          # Chat endpoints (/ask/*)
+│       └── chat.py          # Chat + BYOD endpoints (/ask/*)
 ├── models/
 │   ├── __init__.py
 │   └── chat_models.py       # Pydantic models (Message, ChatRequest)
 ├── utils/
 │   ├── __init__.py
-│   └── helper.py            # LLM utilities, expert chains, streaming
+│   ├── helper.py            # LLM utilities, expert chains, streaming
+│   └── rag.py               # RAG helpers: ingestion, chunking, FAISS retrieval
+├── rag_store/
+│   └── faiss/               # On-disk FAISS index (created at runtime)
 ├── README.md                # This file
 └── requirements.txt         # Python dependencies
 ```
@@ -342,11 +424,14 @@ chat_app/
 - **FastAPI**: Modern web framework for building APIs
 - **Uvicorn**: ASGI server for running FastAPI
 - **LangChain**: Framework for building LLM applications
-- **LangChain Community**: Community integrations (Ollama support)
+- **LangChain Community**: Community integrations (Ollama, FAISS, etc.)
 - **Pydantic**: Data validation using Python type annotations
+- **FAISS (faiss-cpu)**: Efficient similarity search for vector embeddings
 
-### Optional Dependencies
+### Optional / RAG-Related Dependencies
 
+- **PyPDF2**: PDF text extraction for `.pdf` ingestion
+- **python-docx**: DOCX text extraction for `.docx` ingestion
 - **OpenAI Whisper**: Speech-to-text transcription
 - **TTS**: Text-to-speech synthesis (if needed)
 

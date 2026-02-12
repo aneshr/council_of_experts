@@ -23,7 +23,8 @@ This document is designed to help you **explain this project in interviews** –
   - `uvicorn` as the ASGI server.
   - `Pydantic` models for request validation (`Message`, `ChatRequest`).
   - `LangChain` / `langchain_community` with `ChatOllama` as the LLM client.
-  - Local LLM served by **Ollama** (e.g. `gemma2:2b`).
+  - Local LLM + embeddings served by **Ollama** (e.g. `gemma2:2b` for chat, `nomic-embed-text` for embeddings).
+  - `FAISS` (via LangChain) as the in-memory / on-disk vector store for Retrieval-Augmented Generation (RAG).
 
 - **Frontend / UI**
   - Primary expectation: can be any HTTP client (e.g. React).
@@ -37,7 +38,7 @@ This document is designed to help you **explain this project in interviews** –
 
 ---
 
-### 3. Backend Architecture (FastAPI + LLM Router)
+### 3. Backend Architecture (FastAPI + LLM Router + RAG)
 
 #### 3.1 Main Application Setup – `app/main.py`
 
@@ -58,7 +59,7 @@ This document is designed to help you **explain this project in interviews** –
     - `prefix="/ask"` – all endpoints under `/api/v1/ask/*`.
     - `tags=["chat"]` – groups them in the FastAPI docs.
 
-- **Two main endpoints**
+- **Core chat endpoint**
   - `GET /api/v1/ask/`
     - Simple health/test endpoint returning a static JSON message.
   - `POST /api/v1/ask/stream`
@@ -87,7 +88,44 @@ This document is designed to help you **explain this project in interviews** –
 - **Talking point (design choice)**
   - Using `StreamingResponse` + a generator lets the client **render tokens as they arrive**, improving perceived latency and UX, especially compared to waiting for a full LLM response.
 
-#### 3.3 Data Models – `models/chat_models.py`
+#### 3.3 BYOD + RAG Endpoints
+
+You also have a **Bring Your Own Data** (BYOD) flow that turns user documents into a searchable knowledge base, then answers questions grounded in those documents.
+
+- `POST /api/v1/ask/byod`
+  - Ingestion endpoint.
+  - Accepts `multipart/form-data` with:
+    - `file`: the uploaded document (`.txt`, `.md`, `.pdf`, `.docx`).
+    - Optional `doc_name`, `source`, `tags`, `description`, `language`.
+  - Internally:
+    - Extracts raw text using format-specific libraries (`PyPDF2`, `python-docx`, plain decoding).
+    - Splits text into overlapping chunks.
+    - Embeds each chunk using `OllamaEmbeddings(model="nomic-embed-text")`.
+    - Stores embeddings + metadata in a global **FAISS** index on disk (`rag_store/faiss`).
+  - Returns a summary JSON: `doc_id`, `filename`, `file_type`, `num_chunks`, `tags`, `ingested_at`.
+
+- `POST /api/v1/ask/byod-chat`
+  - RAG chat endpoint.
+  - Reuses the same `ChatRequest` model (`question`, `history`).
+  - Flow:
+    1. Embeds the **question** and runs `similarity_search` on the FAISS index to get top‑k relevant chunks.
+    2. Builds a context block from those chunks, including simple citations (e.g. `[1] (Interview Notes) ...`).
+    3. Builds a RAG prompt: system instructions + document context + formatted chat history + current question.
+    4. Streams the answer using `StreamingResponse` as newline-delimited JSON:
+       - `{"content": "<token_chunk>"}` …
+       - Final `{"event": "end"}`.
+
+**Interview angle:**
+
+- You can now describe **two parallel flows**:
+  - Expert‑routed chat over general knowledge (`/stream`).
+  - RAG‑based chat grounded in user documents (`/byod` + `/byod-chat`).
+- Emphasize that:
+  - Embeddings are computed **once at ingestion time**.
+  - Query-time retrieval is very fast thanks to FAISS.
+  - Answers are explicitly **grounded in retrieved context**, and the prompt tells the model to say “I don’t know” when the docs don’t support the answer.
+
+#### 3.4 Data Models – `models/chat_models.py`
 
 - `Message`
   - Represents a single chat message with:
@@ -315,7 +353,30 @@ Ideas you can mention:
   - Centralized logging of questions, chosen experts, latency.
   - Metrics on routing accuracy or fallback behavior.
 
-#### 7.5 “What would you improve if you had more time?”
+#### 7.5 “How does the RAG / BYOD part work?”
+
+Points you can hit:
+
+- **Ingestion path**
+  - Users upload documents through `/api/v1/ask/byod`.
+  - The backend:
+    - Extracts text (PDF/DOCX/TXT).
+    - Chunks into overlapping segments.
+    - Embeds each chunk with a local embedding model via Ollama.
+    - Stores embeddings + metadata in FAISS on disk.
+- **Retrieval path**
+  - At question time (`/api/v1/ask/byod-chat`):
+    - The question is embedded with the same embedding model.
+    - FAISS is queried for nearest neighbors (top‑k chunks).
+    - Those chunks are put into the prompt as “document context” before asking the LLM to answer.
+- **Why this is useful**
+  - Keeps sensitive documents local (no cloud vector DB required).
+  - Makes answers traceable to specific chunks and files.
+  - Allows you to scale to many documents while keeping latency low.
+
+You can position this as “I built a **local RAG system** using FAISS and Ollama, on top of my existing expert‑routing chat backend.”
+
+#### 7.6 “What would you improve if you had more time?”
 
 You can pick several:
 
@@ -326,6 +387,9 @@ You can pick several:
 - Support **multiple experts in parallel** instead of one at a time.
 - Add **authentication** and **rate limiting** for a production deployment.
 - Improve the client parsing of streamed JSON so the UI shows only the `content` field instead of raw JSON lines.
+- Refine the RAG layer:
+  - Switch from a single global index to per‑user namespaces.
+  - Add better chunking (e.g. token-aware, semantic splits) and possibly reranking.
 
 ---
 
