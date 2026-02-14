@@ -33,8 +33,8 @@ This document is designed to help you **explain this project in interviews** –
     - `chat_llm.py`: richer prototype combining experts, summarization, STT, and TTS directly with cloud LLMs.
 
 - **Speech & Audio**
-  - `whisper` and `faster_whisper` for speech‑to‑text demos (`speechtotext.py`, `sp-to-txt.py`).
-  - `TTS` library for text‑to‑speech demos (`texttospeech.py`, parts of `chat_llm.py`).
+  - **Backend voice-query**: `openai-whisper` (small model) and `pydub` in the main FastAPI app (`app/routes/chat.py` → `utils/helper.py`). The `/ask/voice-query` endpoint accepts uploaded audio, converts to WAV, transcribes with Whisper, then runs the same router + expert flow and streams the response (with an initial `transcript` event).
+  - Additional demos: `whisper` / `faster_whisper` in `speechtotext.py`, `sp-to-txt.py`; `TTS` in `texttospeech.py` and `chat_llm.py`.
 
 ---
 
@@ -74,12 +74,15 @@ This document is designed to help you **explain this project in interviews** –
   2. **Initialize the LLM** via `initialize_llm()` from `utils.helper`.
   3. **Ask the router** which expert should answer using `get_expert_from_router()`, which:
      - Builds a routing chain via `router_expert(llm, expert_list, question)`.
-     - Calls `llm_response(chain, question)` to get back **just the expert name**.
-  4. **Build expert chain(s)**:
-     - Currently uses `chat_expert_1(llm, chosen_expert, question, history)` to get a LangChain chain.
+     - Calls `llm_response(chain, question)` to get back the router output (often extra text; only the **first line** is used as the expert name).
+     - If that name is not in `expert_list` or is `"None"`, the router is treated as uncertain.
+  4. **Build expert chain (or handle None)**:
+     - If chosen expert is `"None"`: no chain is built; the generator will yield a single Router message ("I am not sure about the question. Please rephrase the question.") and end.
+     - Otherwise uses `chat_expert(llm, chosen_expert, question, history)` to get a LangChain chain.
   5. **Stream response**:
      - Defines a `generate()` Python generator.
-     - Iterates over `stream_llm_response(chain, question, history)` for each expert.
+     - If chosen expert was `"None"`, yields one content chunk and an end event, then returns.
+     - Otherwise iterates over `stream_llm_response(chain, question, history)` for the chosen expert.
      - Yields **newline‑delimited JSON**:
        - `{"expert": "<name>", "content": "<token_chunk>"}` repeated.
        - Ends with `{"expert": "<name>", "event": "end"}`.
@@ -193,8 +196,9 @@ This module holds the core LLM logic: initializing the LLM, building prompts, ro
   - Enforces rules such as:
     - “Choose exactly ONE expert.”
     - “Return ONLY the expert name.”
-    - “If uncertain, choose the first expert.”
+    - “If uncertain, choose \"None\".”
 - Composes the prompt with the LLM via `promptT | llm` to create a chain.
+- **In the route**: The raw router output is normalized—only the **first line** is used as the expert name. If that name is not in the expert list (e.g. the model added extra text or said "None"), it is treated as `"None"` and the backend returns a single Router fallback message without calling the expert LLM.
 
 **Conceptual explanation for interviews:**
 - You treat the LLM as a **classifier / router** that maps:
@@ -202,16 +206,14 @@ This module holds the core LLM logic: initializing the LLM, building prompts, ro
   - Output: **single expert label**.
 - This is a form of **tool routing / mixture‑of‑experts**, implemented purely via prompting rather than custom ML training.
 
-#### 4.5 Expert Chains – `chat_expert_1/2/3`
+#### 4.5 Expert Chain – `chat_expert`
 
-- Each expert function:
-  - Creates a `PromptTemplate` like:
+- A single function `chat_expert(llm, expertise, question, chat_history)`:
+  - Creates a `PromptTemplate` with:
     - `"You are an expert in {expertise}."`
-    - Includes formatted `chat_history`.
-    - Includes `"User: {question}"`.
+    - Formatted `chat_history` and `"User: {question}"`.
   - Pipes the prompt into `llm` to create a chain (`promptT | llm`).
-- They are structurally similar but **separated** so each expert’s style or instructions can be customized later.
-
+  - Returns the chain for the given expert name (e.g. "Science", "Maths"). The route uses this for whichever expert the router selected; no separate per-expert functions are needed.
 **Potential future improvement to mention:**
 - Use **different models or parameters per expert** (e.g. one small fast model for simple questions, a larger one for complex reasoning).
 
@@ -376,7 +378,13 @@ Points you can hit:
 
 You can position this as “I built a **local RAG system** using FAISS and Ollama, on top of my existing expert‑routing chat backend.”
 
-#### 7.6 “What would you improve if you had more time?”
+#### 7.6 “How does voice input work?”
+
+- **Endpoint**: `POST /api/v1/ask/voice-query` with multipart form: `audio` file + `meta` (JSON with history and expert labels).
+- **Pipeline**: Uploaded audio is converted to WAV (using `pydub`) so Whisper can process it. The backend uses the same **Whisper small** model (lazy-loaded in `utils/helper.py`) to transcribe. The transcript becomes the “question” fed into the existing router and expert chain; the response is streamed in the same JSON-lines format as `/stream`, with an initial `transcript` event so the UI can show the recognized text.
+- **Interview angle**: You can explain end-to-end multimodal input (audio → text → LLM → streamed text) and reuse of the same routing and streaming logic for both text and voice.
+
+#### 7.7 “What would you improve if you had more time?”
 
 You can pick several:
 
@@ -415,12 +423,14 @@ If you’re short on time, focus on: **routing concept + streaming implementatio
 
 ### 9. Quick Reference Summary (Cheat Sheet)
 
-- **Core idea**: Multi‑expert chat with LLM router, streaming responses.
-- **Backend**: FastAPI + LangChain + Ollama; `app/main.py`, `app/routes/chat.py`, `utils/helper.py`, `models/chat_models.py`.
+- **Core idea**: Multi‑expert chat with LLM router, streaming responses; optional voice input and BYOD RAG.
+- **Backend**: FastAPI + LangChain + Ollama; `app/main.py`, `app/routes/chat.py`, `utils/helper.py`, `models/chat_models.py`, `utils/rag.py`.
+- **Endpoints**: `/ask/` (health), `/ask/stream` (text chat), `/ask/voice-query` (audio → Whisper → same router/expert stream), `/ask/byod` (ingest docs), `/ask/byod-chat` (RAG over ingested docs).
 - **Routing**: `router_expert` builds a prompt that forces the LLM to return a **single expert name**.
-- **Streaming**: `stream_llm_response` (`LangChain` stream) → generator → `StreamingResponse` → client.
+- **Streaming**: `stream_llm_response` (LangChain stream) → generator → `StreamingResponse` → client.
+- **Voice**: Audio → pydub (WAV) → Whisper (small) → transcript as question → same flow as `/stream`; first stream line is `transcript` event.
 - **Client**: Streamlit (`ui.py`) calls `/api/v1/ask/stream` and renders the stream; could be swapped for a React frontend.
-- **Extras**: STT/TTS + richer Streamlit prototype in `chat_llm.py`.
+- **Extras**: BYOD RAG (FAISS + Ollama embeddings), STT/TTS demos and richer Streamlit prototype in `chat_llm.py`.
 
 Use this document as a mental map: for any interview question, try to anchor your answer to one of these sections and file names.
 

@@ -19,9 +19,7 @@ from utils.helper import stream_llm_response
 import time
 import requests
 from utils.helper import (
-    chat_expert_1,
-    chat_expert_2,
-    chat_expert_3,
+    chat_expert,
     initialize_llm,
     router_expert,
     llm_response,
@@ -99,17 +97,19 @@ async def stream_chat(request: ChatRequest):
     llm = initialize_llm()
 
     # Ask the router which expert should handle this question.
-    chosen_expert = get_expert_from_router(llm, question, expert_list)
-    print(chosen_expert)
+    raw_expert = get_expert_from_router(llm, question, expert_list)
+    # Router may return extra text (e.g. "None\n\nWhy don't scientists..."); use only the first line.
+    chosen_expert = (raw_expert or "").strip().split("\n")[0].strip()
+    if chosen_expert not in expert_list:
+        chosen_expert = "None"
 
-    # Build a mapping of expert name -> expert chain.
-    # For now only the chosen expert is active; others are commented out.
-    expert_chain = {
-        # returns chain,question,chat_history
-        chosen_expert: chat_expert_1(llm, chosen_expert, question, history),
-        # expert2 : chat_expert_2(llm,expert2,question,history),
-        # expert3 : chat_expert_3(llm,expert3,question,history),
-    }
+    # Build a mapping of expert name -> expert chain. When "None", we do not stream an LLM response.
+    if chosen_expert == "None":
+        expert_chain = {}
+    else:
+        expert_chain = {
+            chosen_expert: chat_expert(llm, chosen_expert, question, history),
+        }
 
     # e.g., LangChain or custom LLM
     def generate():
@@ -119,12 +119,17 @@ async def stream_chat(request: ChatRequest):
         Each expert's response is streamed chunk by chunk using
         `stream_llm_response`, and we tag each chunk with the expert name.
         """
+        if chosen_expert == "None":
+            yield json.dumps(
+                {
+                    "expert": "Router",
+                    "content": "I am not sure about the question. Please rephrase the question.",
+                }
+            ) + "\n"
+            yield json.dumps({"expert": "Router", "event": "end"}) + "\n"
+            return
+
         for expert, chain in expert_chain.items():
-            if expert == "None":
-                # Skip placeholder/disabled experts.
-                continue
-            
-            # yield f"\n\n[{expert} Expert]: \n\n"
             for chunk in stream_llm_response(chain, question, history):
                 yield json.dumps(
                     {
@@ -176,7 +181,6 @@ async def voice_query(audio: UploadFile = File(...), meta: str = Form(...)):
     # Transcribe the audio from the WAV file
     whisper_model = initialize_whisper()
     segments = whisper_model.transcribe(audio=wav_path, language="en", beam_size=5)
-    print("segments:", segments)
     prompt = segments["text"]
     # import llm
     llm = initialize_llm()
@@ -187,7 +191,7 @@ async def voice_query(audio: UploadFile = File(...), meta: str = Form(...)):
     
     # Build the expert chain
     expert_chain = {
-        expert: chat_expert_1(llm, expert, prompt, meta["history"])
+        expert: chat_expert(llm, expert, prompt, meta["history"])
     }
     
     # Stream the expert response (same JSON-lines format as /stream)
@@ -203,7 +207,13 @@ async def voice_query(audio: UploadFile = File(...), meta: str = Form(...)):
 
         # Then stream the expert's answer as normal.
         for expert, chain in expert_chain.items():
-            if expert == "None":
+            if expert.lower() == "none":
+                yield json.dumps(
+                    {
+                        "expert": "Router",
+                        "content": "I am not sure about the question. Please rephrase the question.",
+                    }
+                ) + "\n"
                 continue
             for chunk in stream_llm_response(chain, prompt, meta["history"]):
                 yield json.dumps(

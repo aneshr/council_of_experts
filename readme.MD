@@ -25,7 +25,8 @@ This FastAPI backend implements:
    - **User submits a question** → The system routes it to the most relevant expert using an LLM router.
    - **Expert generates response** → The chosen expert's LLM chain processes the question with conversation context.
    - **Response is streamed** → Tokens are sent back to the client in real-time as JSON lines.
-2. A **BYOD (Bring Your Own Data) RAG pipeline** where:
+2. A **voice query** endpoint (`/ask/voice-query`) that accepts recorded audio, transcribes it with **Whisper**, routes the transcript to the best expert, and streams the expert's response (with an initial transcript event for the UI).
+3. A **BYOD (Bring Your Own Data) RAG pipeline** where:
    - Users upload documents via an ingestion endpoint (`/ask/byod`).
    - Text is extracted, chunked, embedded with a local embedding model via Ollama, and stored in a **FAISS** vector index.
    - A RAG chat endpoint (`/ask/byod-chat`) retrieves the most relevant chunks and streams **context-grounded answers**.
@@ -72,10 +73,10 @@ The backend is designed to work with a React frontend (or any HTTP client) and s
 ### Flow Diagram
 
 1. **Client Request** → POST `/api/v1/ask/stream` with `ChatRequest` payload
-2. **Router Selection** → `router_expert()` uses LLM to choose best expert
-3. **Expert Chain** → `chat_expert_1/2/3()` builds domain-specific prompt chain
-4. **Streaming** → `stream_llm_response()` yields tokens as they're generated
-5. **Response** → JSON lines streamed back to client
+2. **Router Selection** → `router_expert()` uses LLM to choose best expert; result is normalized (first line only). If the choice is not in the expert list or is `"None"`, the router is treated as uncertain.
+3. **Expert Chain** → `chat_expert()` builds the domain-specific prompt chain for the chosen expert (or skipped when router returns `"None"`).
+4. **Streaming** → When router chose an expert: `stream_llm_response()` yields tokens. When router chose `"None"`: a single Router message ("I am not sure...") is returned with no LLM call.
+5. **Response** → JSON lines streamed back to client (`expert`, `content`; ends with `event: "end"`).
 
 ## 📦 Prerequisites
 
@@ -130,6 +131,7 @@ langchain-community>=0.0.20
 pydantic>=2.0.0
 openai-whisper>=20231117
 python-multipart>=0.0.6
+pydub>=0.25.0
 ```
 
 ### 4. Verify Ollama is Running
@@ -256,7 +258,51 @@ The endpoint returns a streaming response with `Content-Type: text/plain`. Each 
 {"expert": "Science", "event": "end"}
 ```
 
-### 3. BYOD Ingestion (RAG Index)
+### 3. Voice Query
+
+**POST** `/api/v1/ask/voice-query`
+
+Accepts recorded audio, transcribes it with Whisper, routes the transcribed text to the best expert, and streams the expert's response. Useful for hands-free or accessibility use cases.
+
+**Request (multipart/form-data):**
+
+- `audio`: UploadFile (required) – recorded audio (e.g. `.webm`, `.wav`, or other format supported by the backend after conversion to WAV).
+- `meta`: JSON string (required) – same shape as `ChatRequest` for context:
+  - `history`: array of `{ role, content }`
+  - `expert1`, `expert2`, `expert3`: expert labels (e.g. `"Science"`, `"Mathematics"`, `"None"`).
+
+**Example (frontend FormData):**
+
+```javascript
+formData.append("audio", audioBlob, "query.webm");
+formData.append("meta", JSON.stringify({
+  history: llmHistory,
+  expert1: experts.expert1,
+  expert2: experts.expert2,
+  expert3: experts.expert3
+}));
+```
+
+**Response format:**
+
+Streamed `text/plain` with newline-delimited JSON:
+
+1. First line: transcribed user question (so the UI can show what was said):
+   ```json
+   {"event": "transcript", "content": "What is photosynthesis?"}
+   ```
+2. Then the same expert stream as `/ask/stream`:
+   ```json
+   {"expert": "Science", "content": "..."}
+   ...
+   {"expert": "Science", "event": "end"}
+   ```
+
+**Notes:**
+
+- The backend converts uploaded audio to WAV (via `pydub`) before sending to Whisper. Ensure `pydub` and `openai-whisper` are installed.
+
+### 4. BYOD Ingestion (RAG Index)
 
 **POST** `/api/v1/ask/byod`
 
@@ -295,7 +341,7 @@ curl -X POST "http://localhost:8000/api/v1/ask/byod" \
 }
 ```
 
-### 4. BYOD RAG Chat
+### 5. BYOD RAG Chat
 
 **POST** `/api/v1/ask/byod-chat`
 
@@ -320,7 +366,7 @@ Ask a question against the documents you have ingested. This endpoint:
 
 **Response Format:**
 
-Newline-delimited JSON objects:
+Newline-delimited JSON objects (no `expert` field; this endpoint is RAG-only):
 
 ```json
 {"content": "You should focus on ..."}
@@ -330,10 +376,9 @@ Newline-delimited JSON objects:
 {"event": "end"}
 ```
 
-**Response Fields:**
-- `expert` (string): Name of the expert generating the response
+**Response Fields (BYOD-chat):**
 - `content` (string): Token chunk from the LLM
-- `event` (string, optional): `"end"` when the expert finishes streaming
+- `event` (string, optional): `"end"` when the stream finishes; `"error"` with `detail` on failure
 
 **Example cURL:**
 
@@ -413,7 +458,7 @@ chat_app/
 - **`utils/helper.py`**: Core LLM functions:
   - `initialize_llm()` - Creates Ollama client
   - `router_expert()` - Builds routing chain
-  - `chat_expert_1/2/3()` - Builds expert-specific chains
+  - `chat_expert()` - Builds expert-specific chain for a given expert name
   - `stream_llm_response()` - Streams tokens from LLM
   - `format_chat_history()` - Converts message list to prompt string
 
@@ -428,12 +473,13 @@ chat_app/
 - **Pydantic**: Data validation using Python type annotations
 - **FAISS (faiss-cpu)**: Efficient similarity search for vector embeddings
 
-### Optional / RAG-Related Dependencies
+### Optional / RAG & Voice Dependencies
 
 - **PyPDF2**: PDF text extraction for `.pdf` ingestion
 - **python-docx**: DOCX text extraction for `.docx` ingestion
-- **OpenAI Whisper**: Speech-to-text transcription
-- **TTS**: Text-to-speech synthesis (if needed)
+- **OpenAI Whisper**: Speech-to-text for the `/ask/voice-query` endpoint (transcribes uploaded audio)
+- **pydub**: Converts uploaded audio to WAV for Whisper in the voice-query flow
+- **TTS**: Text-to-speech synthesis (if needed for future voice answers)
 
 ## 🔧 Development
 
