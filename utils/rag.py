@@ -15,7 +15,7 @@ from typing import List, Dict, Any, Optional
 
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 try:
     import PyPDF2  # type: ignore

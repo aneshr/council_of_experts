@@ -15,7 +15,7 @@ import os
 import whisper
 import tempfile
 from langchain_community.chat_models import ChatOllama
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts.prompt import PromptTemplate
 from pydub import AudioSegment
 
 
@@ -75,17 +75,17 @@ def convert_to_wav(audio_bytes: bytes) -> str:
     """
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         tmp.write(audio_bytes)
-        temp_path = tmp.name
+        temp_path = tmp.name#get the path of the temp file
 
-    audio = AudioSegment.from_file(temp_path)
-    audio.export(temp_path, format="wav")
+    audio = AudioSegment.from_file(temp_path) #convert the audio to wav format
+    audio.export(temp_path, format="wav")#export the audio to the temp file
     return temp_path
 
 def format_chat_history(history):
     """
     Format chat history into a readable string (robust version).
 
-    The function is defensive and supports:
+    # This function is written to handle various input types safely:
     - Pydantic / object-style messages (with `.role` and `.content` attrs).
     - Dict-style messages (with "role" and "content" keys).
     - Skips empty messages.
@@ -175,7 +175,7 @@ def router_expert(llm,expert_list,question):
                 - Do NOT explain your choice.
                 - Do NOT add punctuation or extra words.
                 - If the question spans multiple domains, choose the PRIMARY one.
-                - If uncertain, choose first expert.
+                - If uncertain, choose "None" as the expert and say that you are not sure and ask the user to rephrase the question.
 
                 User question:
                 {question}
@@ -187,78 +187,36 @@ def router_expert(llm,expert_list,question):
     return chain
 
 
-def chat_expert_1(llm,expertise,question,chat_history):
+def chat_expert(llm, expertise, question, chat_history):
     """
-    Create a chain that answers as Expert 1.
+    Create a chain that answers as a given expert.
 
-    `expertise` is a human‑readable domain name (e.g. "Science").
+    Parameters
+    ----------
+    llm : LangChain LLM instance
+    expertise : str
+        Human-readable domain name (e.g. "Science", "Maths").
+    question : str
+        Current user question (used when building the chain; passed again at stream time).
+    chat_history : list
+        Prior conversation messages (formatted inside stream_llm_response).
+
+    Returns
+    -------
+    chain
+        LangChain runnable (PromptTemplate | llm) that expects `chat_history` and `question`.
     """
     promptT = PromptTemplate(
-    input_variables=["chat_history", "question"],
+        input_variables=["chat_history", "question"],
         template=(
             f"You are an expert in {expertise}.\n"
             "Here is the conversation so far:\n"
             "{chat_history}\n\n"
             "User: {question}\n"
             "Answer the user's question directly.\n"
-            
-        ))
-
-    chain = promptT | llm
-
-    return chain
-
-    # response = st.write_stream(stream_llm_response(chain,question,chat_history))
-    # with st.spinner("Generating Speech..."):
-    #     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
-    #         temp_path = f.name
-    #     tts.tts_to_file(text=response, file_path=temp_path)
-    #     st.audio(temp_path)
-    #     play_audio_blocking(temp_path)
-    # return response
-
-def chat_expert_2(llm,expertise,question,chat_history):
-    """
-    Create a chain that answers as Expert 2.
-
-    This is structurally similar to `chat_expert_1`, but separated so you
-    can easily customize prompts per expert.
-    """
-    promptT = PromptTemplate(
-    input_variables=["chat_history", "question"],
-        template=(
-            f"You are an expert in {expertise}.\n"
-            "Here is the conversation so far:\n"
-            "{chat_history}\n\n"
-            "User: {question}\n"
-            "Answer the user's question directly.\n"
-            
-        ))
-
-    chain = promptT | llm
-    return chain
-
-
-def chat_expert_3(llm,expertise,question,chat_history):
-    """
-    Create a chain that answers as Expert 3.
-
-    Currently mirrors the structure of Expert 1 and 2.
-    """
-    promptT = PromptTemplate(
-    input_variables=["chat_history", "question"],
-        template=(
-            f"You are an expert in {expertise}.\n"
-            "Here is the conversation so far:\n"
-            "{chat_history}\n\n"
-            "User: {question}\n"
-            "Answer the user's question directly.\n"
-            
-        ))
-
-    chain = promptT | llm
-
-    return chain
+        ),
+    )
+    return promptT | llm
 
 
 def summarizer(llm,question,chat_history,expert1,expert2,expert3):
@@ -292,5 +250,9 @@ def initiaize_whisper():
     NOTE: function name is intentionally kept as‑is to avoid changing call
     sites; only documentation has been added.
     """
+    if whisper is None:
+        raise ModuleNotFoundError(
+            "Whisper is required. Install with: pip install openai-whisper"
+        )
     model = whisper.load_model("base")
     return model

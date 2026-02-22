@@ -29,6 +29,7 @@ from utils.helper import (
 )
 from models.chat_models import ChatRequest
 from utils.rag import ingest_document, retrieve_context
+from app.graph import router_chat_app
 import json
 import os
 print("Chat routes file:",__file__)
@@ -72,82 +73,60 @@ async def stream_chat(request: ChatRequest):
     """
     Main chat endpoint – streams expert responses back to the client.
 
-    Request body is validated against `ChatRequest` and contains:
-    - `question`: current user question.
-    - `history`: prior messages (role + content).
-    - `expert1`, `expert2`, `expert3`: expert names.
-
-    The server:
-    1. Initializes the underlying LLM.
-    2. Uses the router chain to pick the most relevant expert.
-    3. Builds an expert-specific chain.
-    4. Streams JSON lines back to the caller, where each line has:
-       `{ "expert": <name>, "content": <chunk> }`
-       and finally an `{ "event": "end" }` marker per expert.
+    Uses router_chat_app.stream() with stream_mode=["updates", "messages"]:
+    - "updates": state deltas (router choice, fallback answer_chunks).
+    - "messages": LLM tokens from stream_expert_node (node passes config to invoke
+      so LangGraph streams tokens). Fallback path does not stream tokens.
     """
-    # Collect all experts from the validated request model.
     expert_list = [request.expert1, request.expert2, request.expert3]
     question = request.question
-    history = request.history
-    expert1 = request.expert1
-    expert2 = request.expert2
-    expert3 = request.expert3
-    
-    # Here, you initialize your LLM or chain.
-    llm = initialize_llm()
+    history = request.history or []
 
-    # Ask the router which expert should handle this question.
-    raw_expert = get_expert_from_router(llm, question, expert_list)
-    # Router may return extra text (e.g. "None\n\nWhy don't scientists..."); use only the first line.
-    chosen_expert = (raw_expert or "").strip().split("\n")[0].strip()
-    if chosen_expert not in expert_list:
-        chosen_expert = "None"
+    initial_state = {
+        "question": question,
+        "history": history,
+        "expert_list": expert_list,
+    }
 
-    # Build a mapping of expert name -> expert chain. When "None", we do not stream an LLM response.
-    if chosen_expert == "None":
-        expert_chain = {}
-    else:
-        expert_chain = {
-            chosen_expert: chat_expert(llm, chosen_expert, question, history),
-        }
-
-    # e.g., LangChain or custom LLM
     def generate():
-        """
-        Generator that yields JSON lines encoded as UTF‑8 text.
+        chosen_expert = "None"
+        fallback_chunks = None
+        expert_stream_started = False
 
-        Each expert's response is streamed chunk by chunk using
-        `stream_llm_response`, and we tag each chunk with the expert name.
-        """
-        if chosen_expert == "None":
-            yield json.dumps(
-                {
-                    "expert": "Router",
-                    "content": "I am not sure about the question. Please rephrase the question.",
-                }
-            ) + "\n"
+        for event in router_chat_app.stream(
+            initial_state,
+            stream_mode=["updates", "messages"],
+        ):
+            if isinstance(event, tuple) and len(event) == 2:
+                mode, chunk = event
+            else:
+                continue
+
+            if mode == "updates":
+                for node_name, update in chunk.items():
+                    if not isinstance(update, dict):
+                        continue
+                    if "chosen_expert" in update:
+                        chosen_expert = update.get("chosen_expert") or "None"
+                    if node_name == "fallback" and "answer_chunks" in update:
+                        fallback_chunks = update["answer_chunks"]
+                        for c in fallback_chunks:
+                            yield json.dumps({"expert": "Router", "content": c}) + "\n"
+                        yield json.dumps({"expert": "Router", "event": "end"}) + "\n"
+                        return
+
+            elif mode == "messages":
+                msg_chunk, metadata = chunk
+                if getattr(msg_chunk, "content", None):
+                    expert_stream_started = True
+                    yield json.dumps({"expert": chosen_expert, "content": msg_chunk.content}) + "\n"
+
+        if expert_stream_started:
+            yield json.dumps({"expert": chosen_expert, "event": "end"}) + "\n"
+        elif fallback_chunks is None and chosen_expert == "None":
+            yield json.dumps({"expert": "Router", "content": "I am not sure about the question. Please rephrase the question."}) + "\n"
             yield json.dumps({"expert": "Router", "event": "end"}) + "\n"
-            return
 
-        for expert, chain in expert_chain.items():
-            for chunk in stream_llm_response(chain, question, history):
-                yield json.dumps(
-                    {
-                        "expert": expert,
-                        "content": chunk,
-                    }
-                ) + "\n"
-
-            # Signal that this expert has finished streaming.
-            yield json.dumps(
-                {
-                    "expert": expert,
-                    "event": "end",
-                }
-            ) + "\n"
-
-    # StreamingResponse ensures the HTTP connection stays open while
-    # `generate()` yields chunks.
     return StreamingResponse(generate(), media_type="text/plain")
 
 
@@ -171,28 +150,50 @@ async def voice_query(audio: UploadFile = File(...), meta: str = Form(...)):
         );
     """
     # Get the raw audio bytes and metadata from the request
-    audio_bytes = audio.file.read()
-    meta = json.loads(meta)
+    audio_bytes = await audio.read()
+    try:
+        meta = json.loads(meta)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid meta JSON.")
 
     # Always convert the uploaded audio to a proper WAV file on disk.
     # `convert_to_wav` returns the path to a temporary WAV file.
     wav_path = convert_to_wav(audio_bytes)
-    
-    # Transcribe the audio from the WAV file
-    whisper_model = initialize_whisper()
-    segments = whisper_model.transcribe(audio=wav_path, language="en", beam_size=5)
-    prompt = segments["text"]
-    # import llm
-    llm = initialize_llm()
-    # Get the expert from the router
-    expert_list = [meta["expert1"], meta["expert2"], meta["expert3"]]
-    expert = get_expert_from_router(llm, prompt, expert_list)
-    print(expert)
-    
-    # Build the expert chain
-    expert_chain = {
-        expert: chat_expert(llm, expert, prompt, meta["history"])
+    try:
+        # Transcribe the audio from the WAV file
+        whisper_model = initialize_whisper()
+        segments = whisper_model.transcribe(audio=wav_path, language="en", beam_size=5)
+        prompt = segments["text"]
+    finally:
+        if os.path.exists(wav_path):
+            try:
+                os.remove(wav_path)
+            except OSError:
+                pass
+
+    history = meta.get("history") or []
+    expert_list = [
+        meta.get("expert1", ""),
+        meta.get("expert2", ""),
+        meta.get("expert3", ""),
+    ]
+    initial_state = {
+        "question": prompt,
+        "history": history,
+        "expert_list": expert_list,
     }
+    
+    # # import llm
+    # llm = initialize_llm()
+    # # Get the expert from the router
+    # expert_list = [meta["expert1"], meta["expert2"], meta["expert3"]]
+    # expert = get_expert_from_router(llm, prompt, expert_list)
+    # print(expert)
+    
+    # # Build the expert chain
+    # expert_chain = {
+    #     expert: chat_expert(llm, expert, prompt, meta["history"])
+    # }
     
     # Stream the expert response (same JSON-lines format as /stream)
     def generate():
@@ -204,30 +205,43 @@ async def voice_query(audio: UploadFile = File(...), meta: str = Form(...)):
                 "content": prompt,
             }
         ) + "\n"
-
-        # Then stream the expert's answer as normal.
-        for expert, chain in expert_chain.items():
-            if expert.lower() == "none":
-                yield json.dumps(
-                    {
-                        "expert": "Router",
-                        "content": "I am not sure about the question. Please rephrase the question.",
-                    }
-                ) + "\n"
+        chosen_expert = "None"
+        fallback_chunks = None
+        expert_stream_started = False
+        for event in router_chat_app.stream(
+            initial_state,
+            stream_mode=["updates", "messages"],
+        ):
+            if isinstance(event, tuple) and len(event) == 2:
+                mode, chunk = event
+            else:
                 continue
-            for chunk in stream_llm_response(chain, prompt, meta["history"]):
-                yield json.dumps(
-                    { 
-                        "expert": expert,
-                        "content": chunk,
-                    }
-                ) + "\n"
-            yield json.dumps(
-                {
-                    "expert": expert,
-                    "event": "end",
-                }
-            ) + "\n"
+
+            if mode == "updates":
+                for node_name, update in chunk.items():
+                    if not isinstance(update, dict):
+                        continue
+                    if "chosen_expert" in update:
+                        chosen_expert = update.get("chosen_expert") or "None"
+                    if node_name == "fallback" and "answer_chunks" in update:
+                        fallback_chunks = update["answer_chunks"]
+                        for c in fallback_chunks:
+                            yield json.dumps({"expert": "Router", "content": c}) + "\n"
+                        yield json.dumps({"expert": "Router", "event": "end"}) + "\n"
+                        return
+
+            elif mode == "messages":
+                msg_chunk, metadata = chunk
+                if getattr(msg_chunk, "content", None):
+                    expert_stream_started = True
+                    yield json.dumps({"expert": chosen_expert, "content": msg_chunk.content}) + "\n"
+
+        if expert_stream_started:
+            yield json.dumps({"expert": chosen_expert, "event": "end"}) + "\n"
+        elif fallback_chunks is None and chosen_expert == "None":
+            yield json.dumps({"expert": "Router", "content": "I am not sure about the question. Please rephrase the question."}) + "\n"
+            yield json.dumps({"expert": "Router", "event": "end"}) + "\n"
+
     return StreamingResponse(generate(), media_type="text/plain")
 
 @router.post("/byod")
@@ -349,7 +363,7 @@ async def byod_chat(request: ChatRequest):
     # Step 2: build a simple RAG prompt chain.
     llm = initialize_llm()
 
-    from langchain.prompts import PromptTemplate
+    from langchain_core.prompts.prompt import PromptTemplate
 
     promptT = PromptTemplate(
         input_variables=["chat_history", "question", "context"],
