@@ -26,10 +26,12 @@ from utils.helper import (
     convert_to_wav,
     initialize_whisper,
     format_chat_history,
+    run_llava_on_image,
 )
 from models.chat_models import ChatRequest
 from utils.rag import ingest_document, retrieve_context
 from app.graph import router_chat_app
+from app.graph.rag import rag_chat_app
 import json
 import os
 print("Chat routes file:",__file__)
@@ -78,7 +80,8 @@ async def stream_chat(request: ChatRequest):
     - "messages": LLM tokens from stream_expert_node (node passes config to invoke
       so LangGraph streams tokens). Fallback path does not stream tokens.
     """
-    expert_list = [request.expert1, request.expert2, request.expert3]
+    # Accept a dynamic list of experts from the request body.
+    expert_list = [e for e in (request.experts or []) if e and e != "None"]
     question = request.question
     history = request.history or []
 
@@ -172,11 +175,16 @@ async def voice_query(audio: UploadFile = File(...), meta: str = Form(...)):
                 pass
 
     history = meta.get("history") or []
-    expert_list = [
-        meta.get("expert1", ""),
-        meta.get("expert2", ""),
-        meta.get("expert3", ""),
-    ]
+    # Prefer a dynamic experts list; fall back to legacy expert1/2/3 if present.
+    experts = meta.get("experts")
+    if isinstance(experts, list):
+        expert_list = [e for e in experts if isinstance(e, str) and e and e != "None"]
+    else:
+        expert_list = [
+            meta.get("expert1", ""),
+            meta.get("expert2", ""),
+            meta.get("expert3", ""),
+        ]
     initial_state = {
         "question": prompt,
         "history": history,
@@ -240,6 +248,144 @@ async def voice_query(audio: UploadFile = File(...), meta: str = Form(...)):
             yield json.dumps({"expert": chosen_expert, "event": "end"}) + "\n"
         elif fallback_chunks is None and chosen_expert == "None":
             yield json.dumps({"expert": "Router", "content": "I am not sure about the question. Please rephrase the question."}) + "\n"
+            yield json.dumps({"expert": "Router", "event": "end"}) + "\n"
+
+    return StreamingResponse(generate(), media_type="text/plain")
+
+
+@router.post("/vision-query")
+async def vision_query(image: UploadFile = File(...), meta: str = Form(...)):
+    """
+    Vision query endpoint – accepts an image plus metadata, runs a LLaVA
+    vision model via Ollama to summarize/analyze the image, then routes the
+    combined text through the main router graph and streams the response.
+
+    Request (multipart/form-data):
+        - image: UploadFile (required)
+        - meta: str (required JSON) with fields:
+            - question: str (optional)
+            - history: list[Message] (optional)
+            - expert1, expert2, expert3: str (optional)
+            - mode: str (optional; "general" | "ocr" | "diagram", etc.)
+    """
+    # Read image bytes and parse metadata JSON.
+    image_bytes = await image.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded image is empty.")
+
+    try:
+        meta_obj = json.loads(meta)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid meta JSON.")
+
+    history = meta_obj.get("history") or []
+    # Prefer a dynamic experts list; fall back to legacy expert1/2/3 if present.
+    experts = meta_obj.get("experts")
+    if isinstance(experts, list):
+        expert_list = [e for e in experts if isinstance(e, str) and e and e != "None"]
+    else:
+        expert_list = [
+            meta_obj.get("expert1", ""),
+            meta_obj.get("expert2", ""),
+            meta_obj.get("expert3", ""),
+        ]
+    user_question = meta_obj.get("question") or None
+    mode = meta_obj.get("mode", "general")
+
+    # Run the vision model to get a textual description / analysis.
+    try:
+        vision_output = run_llava_on_image(
+            image_bytes=image_bytes,
+            user_question=user_question,
+            mode=mode,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print("Error in /ask/vision-query LLaVA call:", e)
+        raise HTTPException(
+            status_code=500,
+            detail="Vision model failed. Please try again later.",
+        )
+
+    # Compose the final question for the LangGraph router.
+    if user_question:
+        final_question = (
+            f"User question: {user_question}\n\n"
+            f"Vision model summary of the image:\n{vision_output}"
+        )
+    else:
+        final_question = (
+            "The user did not provide an explicit question.\n"
+            "Answer based on this description of the image:\n"
+            f"{vision_output}"
+        )
+
+    initial_state = {
+        "question": final_question,
+        "history": history,
+        "expert_list": expert_list,
+    }
+
+    def generate():
+        # First send the vision summary so the frontend can display what the
+        # vision model saw before streaming the expert's answer.
+        yield json.dumps(
+            {
+                "event": "vision_summary",
+                "content": vision_output,
+            }
+        ) + "\n"
+
+        chosen_expert = "None"
+        fallback_chunks = None
+        expert_stream_started = False
+
+        for event in router_chat_app.stream(
+            initial_state,
+            stream_mode=["updates", "messages"],
+        ):
+            if isinstance(event, tuple) and len(event) == 2:
+                mode_name, chunk = event
+            else:
+                continue
+
+            if mode_name == "updates":
+                for node_name, update in chunk.items():
+                    if not isinstance(update, dict):
+                        continue
+                    if "chosen_expert" in update:
+                        chosen_expert = update.get("chosen_expert") or "None"
+                    if node_name == "fallback" and "answer_chunks" in update:
+                        fallback_chunks = update["answer_chunks"]
+                        for c in fallback_chunks:
+                            yield json.dumps(
+                                {"expert": "Router", "content": c}
+                            ) + "\n"
+                        yield json.dumps(
+                            {"expert": "Router", "event": "end"}
+                        ) + "\n"
+                        return
+
+            elif mode_name == "messages":
+                msg_chunk, metadata = chunk
+                if getattr(msg_chunk, "content", None):
+                    expert_stream_started = True
+                    yield json.dumps(
+                        {"expert": chosen_expert, "content": msg_chunk.content}
+                    ) + "\n"
+
+        if expert_stream_started:
+            yield json.dumps(
+                {"expert": chosen_expert, "event": "end"}
+            ) + "\n"
+        elif fallback_chunks is None and chosen_expert == "None":
+            yield json.dumps(
+                {
+                    "expert": "Router",
+                    "content": "I am not sure about the question. Please rephrase the question.",
+                }
+            ) + "\n"
             yield json.dumps({"expert": "Router", "event": "end"}) + "\n"
 
     return StreamingResponse(generate(), media_type="text/plain")
@@ -360,53 +506,38 @@ async def byod_chat(request: ChatRequest):
             detail="Failed to retrieve context from the document index.",
         )
 
-    # Step 2: build a simple RAG prompt chain.
-    llm = initialize_llm()
-
-    from langchain_core.prompts.prompt import PromptTemplate
-
-    promptT = PromptTemplate(
-        input_variables=["chat_history", "question", "context"],
-        template=(
-            "You are a helpful assistant answering questions based on the provided documents.\n"
-            "Use the document context as your PRIMARY source of truth.\n"
-            "If the answer is not clearly supported by the documents, say you don't know.\n\n"
-            "Document context:\n"
-            "{context}\n\n"
-            "Conversation so far:\n"
-            "{chat_history}\n\n"
-            "User: {question}\n"
-            "Assistant:"
-        ),
-    )
-
-    chain = promptT | llm
+    # Step 2: delegate answer generation to the LangGraph RAG app.
+    initial_state = {
+        "question": question,
+        "history": history,
+        "context": context_str,
+    }
 
     def generate():
         """
-        Stream the RAG answer as newline-delimited JSON objects.
+        Stream the RAG answer as newline-delimited JSON objects via LangGraph.
         """
-        full_history = format_chat_history(history)
-        try:
-            for chunk in chain.stream(
-                {
-                    "chat_history": full_history,
-                    "question": question,
-                    "context": context_str,
-                }
-            ):
-                yield json.dumps({"content": chunk.content}) + "\n"
+        answer_stream_started = False
 
+        # We rely on rag_chat_app to stream LLM tokens in "messages" mode,
+        # analogous to the main /ask/stream endpoint.
+        for event in rag_chat_app.stream(
+            initial_state,
+            stream_mode=["messages"],
+        ):
+            if isinstance(event, tuple) and len(event) == 2:
+                mode, chunk = event
+            else:
+                continue
+
+            if mode == "messages":
+                msg_chunk, metadata = chunk
+                if getattr(msg_chunk, "content", None):
+                    answer_stream_started = True
+                    yield json.dumps({"content": msg_chunk.content}) + "\n"
+
+        if answer_stream_started:
             yield json.dumps({"event": "end"}) + "\n"
-        except Exception as e:
-            print("Error streaming RAG response:", e)
-            # Best-effort error notification to the client.
-            yield json.dumps(
-                {
-                    "event": "error",
-                    "detail": "Error while streaming RAG response.",
-                }
-            ) + "\n"
 
     return StreamingResponse(generate(), media_type="text/plain")
 

@@ -7,34 +7,38 @@ This document is designed to help you **explain this project in interviews** –
 ### 1. High‑Level Elevator Pitch
 
 - **What this project is**
-  - A **FastAPI backend** that powers an **“experts council” chat system**.
-  - A user asks a question; an **LLM router** picks the best “expert”; that expert’s LLM chain generates and **streams** the answer token‑by‑token to the client.
-  - There are also **Streamlit UIs** and **speech (STT/TTS)** utilities built around the same idea.
+  - A **FastAPI + LangGraph backend** and a **Vite + React frontend** that power an **“experts council” chat system** plus a BYOD RAG mode.
+  - A user asks a question; a **LangGraph router state machine** picks the best expert; that expert’s LangChain chain generates and **streams** the answer token‑by‑token to the client.
+  - Users can also **upload their own documents**, which are indexed into FAISS and queried via a **RAG graph**, and they can send **voice queries** that are transcribed with Whisper and routed through the same pipeline.
 
 - **One‑liner you can say**
-  - “I built a FastAPI‑based multi‑expert chat backend that uses an LLM as a router to pick the best expert per question and streams responses in real time to a web UI, with optional speech‑to‑text and text‑to‑speech add‑ons.”
+  - “I built a FastAPI + LangGraph multi‑expert chat system with a modern React frontend. A router graph chooses the best expert per question, answers are streamed in real time, and there’s a BYOD RAG mode plus voice queries on top of a local Ollama + FAISS stack.”
 
 ---
 
 ### 2. Tech Stack Overview
 
 - **Backend**
-  - `FastAPI` for the HTTP API.
-  - `uvicorn` as the ASGI server.
-  - `Pydantic` models for request validation (`Message`, `ChatRequest`).
-  - `LangChain` / `langchain_community` with `ChatOllama` as the LLM client.
+  - **FastAPI** for the HTTP API.
+  - **uvicorn** as the ASGI server.
+  - **Pydantic** models for request validation (`Message`, `ChatRequest`).
+  - **LangChain** / `langchain_community` with `ChatOllama` as the LLM client.
+  - **LangGraph** for orchestrating flows as explicit state machines:
+    - `router_chat_app` (expert router graph).
+    - `rag_chat_app` (RAG answer graph).
   - Local LLM + embeddings served by **Ollama** (e.g. `gemma2:2b` for chat, `nomic-embed-text` for embeddings).
-  - `FAISS` (via LangChain) as the in-memory / on-disk vector store for Retrieval-Augmented Generation (RAG).
+  - **FAISS** (via LangChain) as the on-disk vector store for Retrieval‑Augmented Generation (RAG).
 
 - **Frontend / UI**
-  - Primary expectation: can be any HTTP client (e.g. React).
-  - Existing **Streamlit UIs**:
-    - `ui.py`: simple web chat that calls the FastAPI streaming endpoint.
-    - `chat_llm.py`: richer prototype combining experts, summarization, STT, and TTS directly with cloud LLMs.
+  - **Vite + React** SPA in `Frontend/`:
+    - “Experts council” chat that streams expert responses from `/api/v1/ask/stream`.
+    - “Your documents (BYOD)” mode for upload + RAG chat over ingested docs.
+    - Voice query button that records audio and calls `/api/v1/ask/voice-query`.
+  - (Legacy prototypes: some Streamlit UIs still exist in `tempfilese/`, but the main UI is now React.)
 
 - **Speech & Audio**
   - **Backend voice-query**: `openai-whisper` (small model) and `pydub` in the main FastAPI app (`app/routes/chat.py` → `utils/helper.py`). The `/ask/voice-query` endpoint accepts uploaded audio, converts to WAV, transcribes with Whisper, then runs the same router + expert flow and streams the response (with an initial `transcript` event).
-  - Additional demos: `whisper` / `faster_whisper` in `speechtotext.py`, `sp-to-txt.py`; `TTS` in `texttospeech.py` and `chat_llm.py`.
+  - Additional demos: `whisper` / `faster_whisper` in older scripts (`speechtotext.py`, `sp-to-txt.py`); `TTS` in `texttospeech.py` and `chat_llm.py`.
 
 ---
 
@@ -58,7 +62,7 @@ This document is designed to help you **explain this project in interviews** –
   - Uses `APIRouter` with:
     - `prefix="/ask"` – all endpoints under `/api/v1/ask/*`.
     - `tags=["chat"]` – groups them in the FastAPI docs.
-
+ 
 - **Core chat endpoint**
   - `GET /api/v1/ask/`
     - Simple health/test endpoint returning a static JSON message.
@@ -69,27 +73,20 @@ This document is designed to help you **explain this project in interviews** –
       - `history: List[Message]`
       - `expert1`, `expert2`, `expert3`: expert labels (e.g. “Science”, “Mathematics”).
 
-- **Flow inside `/stream`**
-  1. **Collect experts** from the request into `expert_list`.
-  2. **Initialize the LLM** via `initialize_llm()` from `utils.helper`.
-  3. **Ask the router** which expert should answer using `get_expert_from_router()`, which:
-     - Builds a routing chain via `router_expert(llm, expert_list, question)`.
-     - Calls `llm_response(chain, question)` to get back the router output (often extra text; only the **first line** is used as the expert name).
-     - If that name is not in `expert_list` or is `"None"`, the router is treated as uncertain.
-  4. **Build expert chain (or handle None)**:
-     - If chosen expert is `"None"`: no chain is built; the generator will yield a single Router message ("I am not sure about the question. Please rephrase the question.") and end.
-     - Otherwise uses `chat_expert(llm, chosen_expert, question, history)` to get a LangChain chain.
-  5. **Stream response**:
-     - Defines a `generate()` Python generator.
-     - If chosen expert was `"None"`, yields one content chunk and an end event, then returns.
-     - Otherwise iterates over `stream_llm_response(chain, question, history)` for the chosen expert.
-     - Yields **newline‑delimited JSON**:
-       - `{"expert": "<name>", "content": "<token_chunk>"}` repeated.
-       - Ends with `{"expert": "<name>", "event": "end"}`.
-  6. Wraps `generate()` in `StreamingResponse` with `media_type="text/plain"`.
+- **Flow inside `/stream` (LangGraph‑based)**
+  1. Build an initial state `{ question, history, expert_list }`.
+  2. Call `router_chat_app.stream(initial_state, stream_mode=["updates", "messages"])`.
+  3. Handle **updates**:
+     - Router node sets `chosen_expert` and may emit router events.
+     - If `chosen_expert == "None"`, a fallback node sets `answer_chunks` to a clarification message; the route treats this as a “Router” answer.
+  4. Handle **messages**:
+     - When the graph is in the `stream_expert` node, LangGraph streams LLM tokens via `stream_mode="messages"`.
+     - The route converts each chunk into NDJSON:  
+       `{"expert": "<chosen_expert>", "content": "<token_chunk>"}`.
+  5. At the end of the stream, the route emits a final `{"expert": "<chosen_expert>", "event": "end"}` line and closes the `StreamingResponse`.
 
 - **Talking point (design choice)**
-  - Using `StreamingResponse` + a generator lets the client **render tokens as they arrive**, improving perceived latency and UX, especially compared to waiting for a full LLM response.
+  - Using **LangGraph** lets you model routing and fallback logic as explicit nodes/edges, while `StreamingResponse` still gives the client low‑latency token streaming.
 
 #### 3.3 BYOD + RAG Endpoints
 

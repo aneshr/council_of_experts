@@ -36,13 +36,11 @@ class ChatRequest(BaseModel):
         Current user question.
     history : list[Message] | None
         Prior conversation messages. Defaults to an empty list.
-    expert1, expert2, expert3 : str | None
-        Names/labels of configured experts. `expert1` is typically required,
-        while `expert2` and `expert3` may be "None" when unused.
+    experts : list[str]
+        Names/labels of configured experts. The first expert is typically
+        required; additional experts are optional.
     """
 
     question: str
     history: Optional[List[Message]] = []
-    expert1: Optional[str] = "science"
-    expert2: Optional[str] = "None"
-    expert3: Optional[str] = "None"
+    experts: List[str] = ["science"]

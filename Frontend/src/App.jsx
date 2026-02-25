@@ -5,11 +5,8 @@ export default function App() {
   const [page, setPage] = useState("welcome");
   const [welcomeStep, setWelcomeStep] = useState("choose"); // "choose" | "experts"
 
-  const [experts, setExperts] = useState({
-    expert1: "Science",
-    expert2: "Maths",
-    expert3: "Biology"
-  });
+  // Dynamic list of experts (defaults to 3, can add more)
+  const [experts, setExperts] = useState(["Science", "Maths", "Biology"]);
 
   const [messages, setMessages] = useState([]);        // UI only
   const [llmHistory, setLlmHistory] = useState([]);    // LLM memory
@@ -28,6 +25,10 @@ export default function App() {
   const [byodDragOver, setByodDragOver] = useState(false);
   const [byodUploadFeedback, setByodUploadFeedback] = useState(null); // { type: 'success'|'error', message }
 
+  // Vision (image) questions in expert chat
+  const [visionFile, setVisionFile] = useState(null);
+  const [visionUploading, setVisionUploading] = useState(false);
+
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -40,6 +41,7 @@ export default function App() {
   const silenceTimerRef = useRef(null);
   const lastChunkTimeRef = useRef(null);
   const byodFileInputRef = useRef(null);
+  const visionFileInputRef = useRef(null);
 
   /* ---------------- navigation ---------------- */
 
@@ -66,6 +68,14 @@ export default function App() {
 
   async function sendMessage() {
     const trimmed = input.trim();
+
+    // If an image is attached, route through the vision flow (text is optional).
+    if (visionFile) {
+      await sendVisionMessage();
+      return;
+    }
+
+    // Text-only flow
     if (!trimmed) return;
 
     // stable ID for this turn
@@ -88,6 +98,8 @@ export default function App() {
 
     setLlmHistory(nextHistory);
 
+    const activeExperts = experts.filter(e => e && e !== "None");
+
     let assistantBuffer = "";
 
     try {
@@ -97,9 +109,7 @@ export default function App() {
         body: JSON.stringify({
           question: trimmed,
           history: nextHistory,          // ✅ NOT stale
-          expert1: experts.expert1,
-          expert2: experts.expert2,
-          expert3: experts.expert3
+          experts: activeExperts
         })
       });
 
@@ -120,12 +130,23 @@ export default function App() {
 
         for (const line of lines) {
           if (!line.trim()) continue;
+          let data;
+          try {
+            data = JSON.parse(line);
+          } catch {
+            console.warn("Bad JSON line from /ask/stream:", line);
+            continue;
+          }
 
-          const data = JSON.parse(line);
           if (data.event === "end") continue;
 
-          const expert = data.expert?.trim();
+          const rawExpert = (data.expert || "").trim();
+          const expertLower = rawExpert.toLowerCase();
           const content = data.content ?? "";
+
+          // Skip empty chunks and router-only messages on the UI
+          if (!content) continue;
+          if (expertLower === "router") continue;
 
           assistantBuffer += content;
 
@@ -139,26 +160,35 @@ export default function App() {
           setMessages(prev => {
             const copy = [...prev];
 
+            // One assistant bubble per turn. We do NOT create separate bubbles
+            // for "None" vs a later expert label; we just update the same one.
             let idx = copy.findIndex(
-              m =>
-                m.role === "assistant" &&
-                m.expert === expert &&
-                m.turnId === turnId
+              m => m.role === "assistant" && m.turnId === turnId
             );
 
             if (idx === -1) {
               copy.push({
                 role: "assistant",
-                expert,
+                expert: undefined,
                 turnId,
                 content: ""
               });
               idx = copy.length - 1;
             }
 
+            const current = copy[idx];
+
+            // Prefer a real expert label when available, hide "none".
+            const isRealExpert =
+              rawExpert && expertLower !== "none";
+            const nextExpert = isRealExpert
+              ? rawExpert
+              : current.expert;
+
             copy[idx] = {
-              ...copy[idx],
-              content: copy[idx].content + content
+              ...current,
+              expert: nextExpert,
+              content: (current.content || "") + content
             };
 
             return copy;
@@ -176,6 +206,189 @@ export default function App() {
     } catch (err) {
       console.error("Stream error:", err);
       setLoading(false);
+    }
+  }
+
+  /* ---------------- vision (image) question in expert chat ---------------- */
+
+  async function sendVisionMessage() {
+    if (!visionFile) {
+      alert("Please choose an image file containing text or content to analyze.");
+      return;
+    }
+
+    const trimmedQuestion = input.trim();
+
+    // stable ID for this turn
+    currentTurnRef.current = Date.now();
+    const turnId = currentTurnRef.current;
+
+    // 1. UI: show a user bubble indicating an image question
+    setMessages(prev => [
+      ...prev,
+      {
+        role: "user",
+        content: trimmedQuestion
+          ? `📷 ${trimmedQuestion}`
+          : "📷 Image question (analyzing…) ",
+        justSent: true
+      }
+    ]);
+    setInput("");
+    setLoading(true);
+    setVisionUploading(true);
+
+    // 2. Extend LLM history with the textual part of the question (if any)
+    const nextHistory = [...llmHistory];
+    if (trimmedQuestion) {
+      nextHistory.push({ role: "user", content: trimmedQuestion });
+    }
+    setLlmHistory(nextHistory);
+
+    let assistantBuffer = "";
+
+    const activeExperts = experts.filter(e => e && e !== "None");
+
+    try {
+      const formData = new FormData();
+      formData.append("image", visionFile);
+      formData.append(
+        "meta",
+        JSON.stringify({
+          question: trimmedQuestion || null,
+          history: nextHistory,
+          experts: activeExperts,
+          mode: "general"
+        })
+      );
+
+      const res = await fetch(
+        "http://127.0.0.1:8000/api/v1/ask/vision-query",
+        {
+          method: "POST",
+          body: formData
+        }
+      );
+
+      if (!res.body) throw new Error("No stream");
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let unlocked = false;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+
+          let data;
+          try {
+            data = JSON.parse(line);
+          } catch {
+            console.warn("Bad JSON line from /ask/vision-query:", line);
+            continue;
+          }
+
+          // Special event: vision model summary of the image
+          if (data.event === "vision_summary") {
+            if (data.content) {
+              setMessages(prev => [
+                ...prev,
+                {
+                  role: "system",
+                  expert: "Vision model",
+                  content: `🖼️ ${data.content}`
+                }
+              ]);
+            }
+            continue;
+          }
+
+          if (data.event === "end") continue;
+
+          const rawExpert = (data.expert || "").trim();
+          const expertLower = rawExpert.toLowerCase();
+          const content = data.content ?? "";
+
+          if (!content) continue;
+          if (expertLower === "router") continue;
+
+          assistantBuffer += content;
+
+          // unlock input once streaming begins
+          if (!unlocked) {
+            setLoading(false);
+            setVisionUploading(false);
+            unlocked = true;
+          }
+
+          // Stream assistant reply into a single bubble for this turn
+          setMessages(prev => {
+            const copy = [...prev];
+
+            let idx = copy.findIndex(
+              m => m.role === "assistant" && m.turnId === turnId
+            );
+
+            if (idx === -1) {
+              copy.push({
+                role: "assistant",
+                expert: undefined,
+                turnId,
+                content: ""
+              });
+              idx = copy.length - 1;
+            }
+
+            const current = copy[idx];
+
+            const isRealExpert =
+              rawExpert && expertLower !== "none";
+            const nextExpert = isRealExpert
+              ? rawExpert
+              : current.expert;
+
+            copy[idx] = {
+              ...current,
+              expert: nextExpert,
+              content: (current.content || "") + content
+            };
+
+            return copy;
+          });
+        }
+      }
+
+      if (assistantBuffer.trim()) {
+        setLlmHistory(prev => [
+          ...prev,
+          { role: "assistant", content: assistantBuffer }
+        ]);
+      }
+    } catch (err) {
+      console.error("Vision stream error:", err);
+      setMessages(prev => [
+        ...prev,
+        {
+          role: "system",
+          content:
+            "There was a problem processing the image question. Please try again."
+        }
+      ]);
+    } finally {
+      setLoading(false);
+      setVisionUploading(false);
+      setVisionFile(null);
+      if (visionFileInputRef.current) {
+        visionFileInputRef.current.value = "";
+      }
     }
   }
 
@@ -415,9 +628,7 @@ export default function App() {
             "meta",
             JSON.stringify({
               history: llmHistory,
-              expert1: experts.expert1,
-              expert2: experts.expert2,
-              expert3: experts.expert3
+              experts: experts.filter(e => e && e !== "None")
             })
           );
 
@@ -578,11 +789,7 @@ export default function App() {
 
   useEffect(() => {
     if (page === "chat" && messages.length === 0) {
-      const activeExperts = [
-        experts.expert1,
-        experts.expert2,
-        experts.expert3
-      ].filter(e => e && e !== "None");
+      const activeExperts = experts.filter(e => e && e !== "None");
 
       const greetingText =
         activeExperts.length === 1
@@ -670,29 +877,36 @@ export default function App() {
           </div>
 
           <div className="expert-inputs">
-            {["expert1", "expert2", "expert3"].map((key, i) => (
-              <div key={key} className="expert-input-row">
-                <label>Expert {i + 1}</label>
+            {experts.map((value, index) => (
+              <div key={index} className="expert-input-row">
+                <label>Expert {index + 1}</label>
                 <input
                   type="text"
-                  placeholder={i === 0 ? "e.g. AI safety" : "Optional"}
-                  value={experts[key]}
+                  placeholder={index === 0 ? "e.g. AI safety" : "Optional"}
+                  value={value}
                   onChange={e => {
-                    const value = e.target.value.trim();
-                    setExperts(prev => ({
-                      ...prev,
-                      [key]: value === "" ? "None" : e.target.value
-                    }));
+                    const next = [...experts];
+                    const trimmed = e.target.value.trim();
+                    next[index] = trimmed === "" ? "None" : e.target.value;
+                    setExperts(next);
                   }}
                 />
               </div>
             ))}
+            <button
+              type="button"
+              className="secondary-btn"
+              onClick={() => setExperts(prev => [...prev, "None"])}
+            >
+              + Add expert
+            </button>
           </div>
 
           <button
             className="primary-btn"
             onClick={() => {
-              if (!experts.expert1.trim() || experts.expert1 === "None") {
+              const activeExperts = experts.filter(e => e && e !== "None");
+              if (activeExperts.length === 0) {
                 alert("Please enter at least one expert.");
                 return;
               }
@@ -952,11 +1166,7 @@ export default function App() {
             </div>
 
             <div className="expert-chips">
-              {[
-                experts.expert1,
-                experts.expert2,
-                experts.expert3
-              ]
+              {experts
                 .filter(e => e && e !== "None")
                 .map(name => (
                   <span key={name} className="expert-chip">
@@ -997,6 +1207,14 @@ export default function App() {
                 }
                 disabled={loading}
               />
+              <div className="attachment-controls">
+                <input
+                  ref={visionFileInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={e => setVisionFile(e.target.files?.[0] || null)}
+                />
+              </div>
               <button
                 type="button"
                 className={`icon-button ${isRecording ? "mic-active" : ""}`}
@@ -1007,12 +1225,14 @@ export default function App() {
               </button>
               <button
                 onClick={sendMessage}
-                disabled={loading || !input.trim()}
+                disabled={loading || (!input.trim() && !visionFile)}
               >
                 {loading ? "Thinking…" : "Send"}
               </button>
             </div>
-            <p className="chat-hint">Press Enter to send</p>
+            <p className="chat-hint">
+              Press Enter to send text, or attach an image with text for vision analysis.
+            </p>
           </div>
         </section>
       </main>

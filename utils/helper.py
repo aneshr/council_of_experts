@@ -8,12 +8,16 @@ Responsibilities of this module:
 - Stream responses from the LLM token by token.
 """
 
+import base64
 import time
 import time  # duplicate import is harmless; kept to avoid non‑comment refactors
 import random
 import os
 import whisper
 import tempfile
+from typing import Optional
+
+import requests
 from langchain_community.chat_models import ChatOllama
 from langchain_core.prompts.prompt import PromptTemplate
 from pydub import AudioSegment
@@ -21,6 +25,10 @@ from pydub import AudioSegment
 
 # Lazy‑initialized global Whisper model so it is loaded only once
 _WHISPER_MODEL = None
+
+# Ollama configuration for both text and vision models.
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+VISION_MODEL_NAME = os.getenv("VISION_MODEL_NAME", "llava:7b")
 
 
 def play_audio_blocking(path: str):
@@ -62,6 +70,82 @@ def initialize_whisper():
     if _WHISPER_MODEL is None:
         _WHISPER_MODEL = whisper.load_model("small")
     return _WHISPER_MODEL
+
+
+def run_llava_on_image(
+    image_bytes: bytes,
+    user_question: Optional[str] = None,
+    mode: str = "general",
+) -> str:
+    """
+    Call a local LLaVA model (via Ollama) on raw image bytes and return
+    a textual summary/analysis.
+
+    Parameters
+    ----------
+    image_bytes : bytes
+        Raw bytes of the uploaded image.
+    user_question : str | None
+        Optional natural-language question from the user about the image.
+    mode : str
+        Optional hint to steer the prompt, e.g. "general", "ocr", "diagram".
+    """
+    if not image_bytes:
+        raise ValueError("Uploaded image is empty.")
+
+    prompt_parts = []
+    if mode == "ocr":
+        prompt_parts.append(
+            "You are an OCR assistant. Extract all readable text from this image. "
+            "Preserve line breaks where possible."
+        )
+    elif mode == "diagram":
+        prompt_parts.append(
+            "You are a diagram analysis assistant. Describe the structure, key "
+            "components, and relationships shown in this image."
+        )
+    else:
+        prompt_parts.append(
+            "You are a vision assistant. Describe this image in detail, including "
+            "any visible text or UI elements."
+        )
+
+    if user_question:
+        prompt_parts.append(
+            f"The user asked: {user_question}\n"
+            "Answer their question using only information you can infer from the image."
+        )
+
+    prompt = "\n\n".join(prompt_parts)
+
+    # Ollama expects base64-encoded image data for vision models.
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+    payload = {
+        "model": VISION_MODEL_NAME,
+        "prompt": prompt,
+        "images": [image_b64],
+        "stream": False,
+    }
+
+    try:
+        resp = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json=payload,
+            timeout=60,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        # Surface a concise error; routes can translate this into HTTPException.
+        raise RuntimeError(f"LLaVA request failed: {e}") from e
+
+    data = resp.json()
+    # Non-streaming /api/generate responses include the full text in `response`.
+    text = data.get("response") or ""
+    if not text:
+        raise RuntimeError("Empty response from LLaVA vision model.")
+
+    return text.strip()
 
 
 def convert_to_wav(audio_bytes: bytes) -> str:
@@ -152,35 +236,38 @@ def llm_response(chain, question):
     # Return the complete content (no yield)
     return result.content
 
-def router_expert(llm,expert_list,question):
+def router_expert(llm, expert_list, question):
     """
     Build a routing chain that selects the best expert for a given question.
 
     The chain, when invoked, should return ONLY the name of the chosen expert.
     """
+    # Format expert list once and keep the user question as a template variable
+    # so that arbitrary characters (including braces) in the question do not
+    # break the PromptTemplate validation.
+    expert_block = "\n".join(str(e) for e in expert_list)
+
     promptT = PromptTemplate(
-    input_variables=["question"],
+        input_variables=["question"],
+        partial_variables={"expert_list": expert_block},
         template=(
-            f"""
-                You are an expert router.
-
-                Your task is to choose the SINGLE most relevant expert to answer the user’s question.
-
-                Available experts:
-                {expert_list}
-
-                Rules:
-                - Choose exactly ONE expert.
-                - Return ONLY the expert name.
-                - Do NOT explain your choice.
-                - Do NOT add punctuation or extra words.
-                - If the question spans multiple domains, choose the PRIMARY one.
-                - If uncertain, choose "None" as the expert and say that you are not sure and ask the user to rephrase the question.
-
-                User question:
-                {question}
-                """
-                ))
+            "You are an expert router.\n\n"
+            "Your task is to choose the SINGLE most relevant expert to answer "
+            "the user’s question.\n\n"
+            "Available experts:\n"
+            "{expert_list}\n\n"
+            "Rules:\n"
+            "- Choose exactly ONE expert.\n"
+            "- Return ONLY the expert name.\n"
+            "- Do NOT explain your choice.\n"
+            "- Do NOT add punctuation or extra words.\n"
+            "- If the question spans multiple domains, choose the PRIMARY one.\n"
+            "- If uncertain, choose \"None\" as the expert and say that you are "
+            "not sure and ask the user to rephrase the question.\n\n"
+            "User question:\n"
+            "{question}"
+        ),
+    )
 
     chain = promptT | llm
 

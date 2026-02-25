@@ -1,6 +1,10 @@
-# Chat App - FastAPI Backend
+## Chat App – FastAPI + LangGraph + React
 
-A FastAPI-based backend service that provides an intelligent chat interface with expert routing capabilities. The system uses an LLM router to select the most relevant expert for each question and streams responses back to the client in real-time.
+A FastAPI‑based backend and a modern React frontend for an **“experts council”** chat system with RAG and voice input. The system uses **LangGraph state machines** and LangChain to:
+
+- Route questions to the most relevant expert.
+- Stream expert answers token‑by‑token to the client.
+- Ingest user documents into a FAISS index and answer questions with **RAG**.
 
 ## 📋 Table of Contents
 
@@ -10,6 +14,7 @@ A FastAPI-based backend service that provides an intelligent chat interface with
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Running the Server](#running-the-server)
+- [Running the Frontend](#running-the-frontend)
 - [API Endpoints](#api-endpoints)
 - [Request/Response Formats](#requestresponse-formats)
 - [Project Structure](#project-structure)
@@ -19,55 +24,69 @@ A FastAPI-based backend service that provides an intelligent chat interface with
 
 ## 🎯 Overview
 
-This FastAPI backend implements:
+This project implements:
 
-1. A **multi-expert chat system** where:
-   - **User submits a question** → The system routes it to the most relevant expert using an LLM router.
-   - **Expert generates response** → The chosen expert's LLM chain processes the question with conversation context.
-   - **Response is streamed** → Tokens are sent back to the client in real-time as JSON lines.
-2. A **voice query** endpoint (`/ask/voice-query`) that accepts recorded audio, transcribes it with **Whisper**, routes the transcript to the best expert, and streams the expert's response (with an initial transcript event for the UI).
-3. A **BYOD (Bring Your Own Data) RAG pipeline** where:
-   - Users upload documents via an ingestion endpoint (`/ask/byod`).
-   - Text is extracted, chunked, embedded with a local embedding model via Ollama, and stored in a **FAISS** vector index.
-   - A RAG chat endpoint (`/ask/byod-chat`) retrieves the most relevant chunks and streams **context-grounded answers**.
-
-The backend is designed to work with a React frontend (or any HTTP client) and supports streaming responses for a smooth user experience.
+1. **Multi‑expert chat** (`/api/v1/ask/stream`)
+   - **User submits a question** → A LangGraph **router graph** (`router_chat_app`) picks the best expert label (e.g. *Science*, *Maths*).
+   - **Expert generates response** → An expert‑specific LangChain chain produces the answer.
+   - **Response is streamed** → Tokens are streamed back as newline‑delimited JSON for a great UX.
+2. **Voice query** (`/api/v1/ask/voice-query`)
+   - Accepts audio, converts to WAV, transcribes with **Whisper**, then reuses the same router + expert flow and streaming format.
+3. **BYOD (Bring Your Own Data) RAG**
+   - `/api/v1/ask/byod` ingests documents, extracts text, chunks, embeds with **OllamaEmbeddings**, and stores in a **FAISS** index.
+   - `/api/v1/ask/byod-chat` uses a LangGraph‑backed RAG graph (`rag_chat_app`) to retrieve relevant chunks and stream **context‑grounded** answers.
+4. **React frontend (Vite)**
+   - Located under `Frontend/`.
+   - Provides a polished “Experts council” panel chat and a full BYOD upload + RAG chat UI.
+   - Consumes the streaming endpoints and renders tokens as they arrive.
 
 ## 🏗️ Architecture
 
 ```
 ┌─────────────┐
-│   Client    │ (React Frontend)
-│  (React)    │
+│   Client    │  (Vite + React Frontend)
 └──────┬──────┘
-       │ HTTP POST /api/v1/ask/stream
-       │
+       │ HTTP POST /api/v1/ask/*
+       │  (streaming NDJSON)
        ▼
-┌─────────────────────────────────────┐
-│      FastAPI Backend                │
-│  ┌───────────────────────────────┐ │
-│  │  app/main.py                  │ │
-│  │  - CORS Configuration          │ │
-│  │  - Router Registration         │ │
-│  └───────────┬───────────────────┘ │
-│              │                     │
-│  ┌───────────▼───────────────────┐ │
-│  │  app/routes/chat.py           │ │
-│  │  - /ask/stream endpoint       │ │
-│  │  - Request validation         │ │
-│  └───────────┬───────────────────┘ │
-│              │                     │
-│  ┌───────────▼───────────────────┐ │
-│  │  utils/helper.py              │ │
-│  │  - LLM initialization         │ │
-│  │  - Expert routing             │ │
-│  │  - Response streaming         │ │
-│  └───────────┬───────────────────┘ │
-│              │                     │
-│  ┌───────────▼───────────────────┐ │
-│  │  Ollama LLM (localhost:11434)  │ │
-│  └────────────────────────────────┘ │
-└─────────────────────────────────────┘
+┌───────────────────────────────────────────────┐
+│                 FastAPI Backend               │
+│  ┌─────────────────────────────────────────┐ │
+│  │ app/main.py                            │ │
+│  │  - CORS (Vite dev origins)             │ │
+│  │  - Router registration                 │ │
+│  └───────────────────────┬────────────────┘ │
+│                          │                  │
+│  ┌───────────────────────▼────────────────┐ │
+│  │ app/routes/chat.py                     │ │
+│  │  - /ask/stream, /ask/voice-query       │ │
+│  │  - /ask/byod, /ask/byod-chat           │ │
+│  └───────────────────────┬────────────────┘ │
+│                          │                  │
+│  ┌───────────────────────▼────────────────┐ │
+│  │ app/graph/router_chat.py              │ │
+│  │  - LangGraph router graph             │ │
+│  │  - Chooses expert / fallback          │ │
+│  └───────────────────────┬────────────────┘ │
+│                          │                  │
+│  ┌───────────────────────▼────────────────┐ │
+│  │ app/graph/rag.py                      │ │
+│  │  - LangGraph RAG chat graph           │ │
+│  │  - (optional) ingest graph            │ │
+│  └───────────────────────┬────────────────┘ │
+│                          │                  │
+│  ┌───────────────────────▼────────────────┐ │
+│  │ utils/helper.py                        │ │
+│  │  - LLM initialization (ChatOllama)     │ │
+│  │  - History formatting                  │ │
+│  └───────────────────────┬────────────────┘ │
+│                          │                  │
+│  ┌───────────────────────▼────────────────┐ │
+│  │ utils/rag.py                          │ │
+│  │  - Text extraction / chunking         │ │
+│  │  - Embeddings + FAISS index           │ │
+│  └────────────────────────────────────────┘ │
+└───────────────────────────────────────────────┘
 ```
 
 ### Flow Diagram
@@ -82,13 +101,13 @@ The backend is designed to work with a React frontend (or any HTTP client) and s
 
 Before running the backend, ensure you have:
 
-- **Python 3.8+** installed
-- **Ollama** installed and running locally
+- **Python 3.10+** installed (to match the `langchain-env` conda setup).
+- **Ollama** installed and running locally:
   - Download from: https://ollama.ai
   - Start the Ollama service: `ollama serve`
-  - Pull the required model: `ollama pull gemma2:2b` (or your preferred model)
-- **Google Cloud credentials** (if using Google services)
-  - Service account JSON file for speech-to-text functionality
+  - Pull the required model: `ollama pull gemma2:2b` (or your preferred model).
+- **conda** (recommended) with a `langchain-env` environment that satisfies `requirements-langgraph.txt`.
+- **Google Cloud credentials** (only if using the extra STT/TTS demos in `tempfilese/`).
 
 ## 🚀 Installation
 
@@ -158,16 +177,22 @@ The backend currently uses hardcoded values in `app/main.py`. For production, mo
 
 ### CORS Configuration
 
-The backend is configured to allow requests from:
-- `http://localhost:5173` (Vite dev server)
-- All origins (`*`) - **⚠️ Restrict this in production**
+The backend is configured to allow requests from the local Vite dev server:
 
-Edit `app/main.py` to customize CORS settings:
+- `http://localhost:5173`
+- `http://localhost:5174`
+
+Edit `app/main.py` to customize CORS settings (add your production domains here):
 
 ```python
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://yourdomain.com"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "https://yourdomain.com",
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -178,10 +203,12 @@ app.add_middleware(
 ### Development Mode
 
 ```bash
+conda activate langchain-env
+cd chat_app
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-The server will start at `http://localhost:8000`
+The server will start at `http://localhost:8000`.
 
 ### Production Mode
 
@@ -191,16 +218,26 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 
 ### Using Docker (Optional)
 
-```dockerfile
-FROM python:3.11-slim
+You can still containerize the backend using a lightweight Dockerfile (not yet updated for `langchain-env`). For local development and interviews, running directly with `uvicorn` is usually simpler.
 
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+## 🖥️ Running the Frontend
 
-COPY . .
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+The main frontend lives in the `Frontend/` directory and is built with **Vite + React**.
+
+```bash
+cd Frontend
+npm install
+npm run dev
 ```
+
+By default Vite will start on `http://localhost:5173` or `http://localhost:5174`. The React app:
+
+- Streams from `http://127.0.0.1:8000/api/v1/ask/stream` for the **Experts council** chat.
+- Ingests documents via `http://127.0.0.1:8000/api/v1/ask/byod`.
+- Runs RAG chat via `http://127.0.0.1:8000/api/v1/ask/byod-chat`.
+- Sends voice queries via `http://127.0.0.1:8000/api/v1/ask/voice-query`.
+
+Ensure the backend server is running before starting the frontend.
 
 ## 📡 API Endpoints
 
@@ -434,6 +471,9 @@ Each line in the stream is a JSON object (newline-delimited JSON):
 chat_app/
 ├── app/
 │   ├── main.py              # FastAPI app initialization, CORS config
+│   ├── graph/
+│   │   ├── __init__.py      # router_chat graph wiring (LangGraph)
+│   │   └── rag.py           # RAG LangGraph graphs (chat + ingest)
 │   └── routes/
 │       ├── __init__.py
 │       └── chat.py          # Chat + BYOD endpoints (/ask/*)
@@ -442,25 +482,38 @@ chat_app/
 │   └── chat_models.py       # Pydantic models (Message, ChatRequest)
 ├── utils/
 │   ├── __init__.py
-│   ├── helper.py            # LLM utilities, expert chains, streaming
+│   ├── helper.py            # LLM utilities, expert chains, streaming helpers
 │   └── rag.py               # RAG helpers: ingestion, chunking, FAISS retrieval
+├── Frontend/
+│   ├── index.html           # Vite entry
+│   └── src/
+│       ├── App.jsx          # React SPA (Experts + BYOD)
+│       └── index.css        # Main styling
 ├── rag_store/
 │   └── faiss/               # On-disk FAISS index (created at runtime)
-├── README.md                # This file
-└── requirements.txt         # Python dependencies
+├── tests/                   # pytest-based test suite (backend)
+├── requirements.txt         # Base Python dependencies
+├── requirements-langgraph.txt  # LangGraph / LangChain / FAISS stack
+└── requirements-dev.txt     # pytest + dev dependencies
 ```
 
 ### Key Files Explained
 
-- **`app/main.py`**: FastAPI application entry point, middleware setup, router registration
-- **`app/routes/chat.py`**: Chat endpoints, request handling, streaming logic
-- **`models/chat_models.py`**: Pydantic models for request/response validation
-- **`utils/helper.py`**: Core LLM functions:
-  - `initialize_llm()` - Creates Ollama client
-  - `router_expert()` - Builds routing chain
-  - `chat_expert()` - Builds expert-specific chain for a given expert name
-  - `stream_llm_response()` - Streams tokens from LLM
-  - `format_chat_history()` - Converts message list to prompt string
+- **`app/main.py`**: FastAPI entry point, CORS setup, router registration.
+- **`app/routes/chat.py`**: All `/api/v1/ask/*` endpoints: streaming chat, voice query, BYOD ingest, BYOD RAG chat.
+- **`app/graph/__init__.py`** and **`app/graph/router_chat.py`**: LangGraph router graph (`router_chat_app`) that chooses experts and drives the main `/ask/stream` endpoint.
+- **`app/graph/rag.py`**: LangGraph RAG graph (`rag_chat_app`) used by `/ask/byod-chat` (and an optional ingest graph).
+- **`models/chat_models.py`**: Pydantic models for `Message` and `ChatRequest`.
+- **`utils/helper.py`**: Core LLM helpers:
+  - `initialize_llm()` – Creates the Ollama chat client.
+  - `format_chat_history()` – Normalizes history into a prompt string.
+  - `router_expert()` / `llm_response()` – Router chain + execution.
+  - `chat_expert()` – Builds an expert-specific chain.
+- **`utils/rag.py`**: RAG building blocks: text extraction, chunking, embeddings, FAISS index load/save.
+- **`Frontend/src/App.jsx`**: React SPA that:
+  - Streams multi‑expert answers from `/api/v1/ask/stream`.
+  - Provides BYOD upload and RAG chat flows.
+  - Sends voice queries to `/api/v1/ask/voice-query`.
 
 ## 📚 Dependencies
 
@@ -485,12 +538,21 @@ chat_app/
 
 ### Running Tests
 
-```bash
-# Install test dependencies
-pip install pytest pytest-asyncio httpx
+Use the **langchain-env** conda environment (required for LangGraph and full app imports):
 
-# Run tests
-pytest
+```bash
+conda activate langchain-env
+cd chat_app
+pip install -r requirements-langgraph.txt
+pip install -r requirements-dev.txt
+# From project root so app/ and utils/ are importable:
+PYTHONPATH=. pytest tests/ -v
+```
+
+With coverage:
+
+```bash
+pytest tests/ -v --cov=app --cov=utils --cov=models --cov-report=term-missing
 ```
 
 ### Code Style
