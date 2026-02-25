@@ -1,6 +1,6 @@
 ## Chat App – FastAPI + LangGraph + React
 
-A FastAPI‑based backend and a modern React frontend for an **“experts council”** chat system with RAG and voice input. The system uses **LangGraph state machines** and LangChain to:
+A FastAPI‑based backend and a modern React frontend for an **“experts council”** chat system with RAG, voice, and vision input. The system uses **LangGraph state machines** and LangChain to:
 
 - Route questions to the most relevant expert.
 - Stream expert answers token‑by‑token to the client.
@@ -35,7 +35,9 @@ This project implements:
 3. **BYOD (Bring Your Own Data) RAG**
    - `/api/v1/ask/byod` ingests documents, extracts text, chunks, embeds with **OllamaEmbeddings**, and stores in a **FAISS** index.
    - `/api/v1/ask/byod-chat` uses a LangGraph‑backed RAG graph (`rag_chat_app`) to retrieve relevant chunks and stream **context‑grounded** answers.
-4. **React frontend (Vite)**
+4. **Vision chat (images)** (`/api/v1/ask/vision-query`)
+   - Accepts an image plus optional text, runs a local **LLaVA** model via Ollama to summarize/analyze the image, then feeds that summary into the same LangGraph router graph used for text chat.
+5. **React frontend (Vite)**
    - Located under `Frontend/`.
    - Provides a polished “Experts council” panel chat and a full BYOD upload + RAG chat UI.
    - Consumes the streaming endpoints and renders tokens as they arrive.
@@ -278,9 +280,7 @@ Main chat endpoint that streams expert responses.
       "content": "Hi! How can I help?"
     }
   ],
-  "expert1": "Science",
-  "expert2": "Mathematics",
-  "expert3": "None"
+  "experts": ["Science", "Mathematics"]
 }
 ```
 
@@ -306,7 +306,7 @@ Accepts recorded audio, transcribes it with Whisper, routes the transcribed text
 - `audio`: UploadFile (required) – recorded audio (e.g. `.webm`, `.wav`, or other format supported by the backend after conversion to WAV).
 - `meta`: JSON string (required) – same shape as `ChatRequest` for context:
   - `history`: array of `{ role, content }`
-  - `expert1`, `expert2`, `expert3`: expert labels (e.g. `"Science"`, `"Mathematics"`, `"None"`).
+  - `experts`: array of expert labels (e.g. `["Science", "Mathematics"]`).
 
 **Example (frontend FormData):**
 
@@ -314,9 +314,7 @@ Accepts recorded audio, transcribes it with Whisper, routes the transcribed text
 formData.append("audio", audioBlob, "query.webm");
 formData.append("meta", JSON.stringify({
   history: llmHistory,
-  expert1: experts.expert1,
-  expert2: experts.expert2,
-  expert3: experts.expert3
+  experts: experts.filter(e => e && e !== "None")
 }));
 ```
 
@@ -339,7 +337,40 @@ Streamed `text/plain` with newline-delimited JSON:
 
 - The backend converts uploaded audio to WAV (via `pydub`) before sending to Whisper. Ensure `pydub` and `openai-whisper` are installed.
 
-### 4. BYOD Ingestion (RAG Index)
+### 4. Vision Query (Images)
+
+**POST** `/api/v1/ask/vision-query`
+
+Accepts an image plus optional text, runs a local **LLaVA** vision model via Ollama to summarize/analyze the image, then routes the combined text through the same LangGraph router graph and streams the expert's response.
+
+**Request (multipart/form-data):**
+
+- `image`: UploadFile (required) – image file (e.g. `.png`, `.jpg`).
+- `meta`: JSON string (required) with fields:
+  - `question: str | null` – optional explicit question about the image.
+  - `history: List[Message]` – prior conversation history.
+  - `experts: List[str]` – expert labels (as in `/ask/stream`).
+  - `mode: str` – optional hint such as `"general"`, `"ocr"`, `"diagram"`.
+
+**Response format:**
+
+Streamed `text/plain` with newline-delimited JSON:
+
+1. First line: vision model summary of the image:
+
+   ```json
+   {"event": "vision_summary", "content": "<summary of the image>"}
+   ```
+
+2. Then the same expert stream as `/ask/stream`:
+
+   ```json
+   {"expert": "Science", "content": "..."}
+   ...
+   {"expert": "Science", "event": "end"}
+   ```
+
+### 5. BYOD Ingestion (RAG Index)
 
 **POST** `/api/v1/ask/byod`
 
@@ -378,7 +409,7 @@ curl -X POST "http://localhost:8000/api/v1/ask/byod" \
 }
 ```
 
-### 5. BYOD RAG Chat
+### 6. BYOD RAG Chat
 
 **POST** `/api/v1/ask/byod-chat`
 
@@ -394,10 +425,7 @@ Ask a question against the documents you have ingested. This endpoint:
 ```json
 {
   "question": "What are the main topics I should prepare for this interview?",
-  "history": [],
-  "expert1": "None",
-  "expert2": "None",
-  "expert3": "None"
+  "history": []
 }
 ```
 
@@ -425,9 +453,7 @@ curl -X POST "http://localhost:8000/api/v1/ask/stream" \
   -d '{
     "question": "Explain photosynthesis",
     "history": [],
-    "expert1": "Science",
-    "expert2": "None",
-    "expert3": "None"
+    "experts": ["Science"]
   }'
 ```
 
@@ -439,9 +465,7 @@ curl -X POST "http://localhost:8000/api/v1/ask/stream" \
 {
   "question": str,                    # Required: User's question
   "history": List[Message],            # Optional: Previous messages
-  "expert1": str,                      # Optional: Default "science"
-  "expert2": str,                      # Optional: Default "None"
-  "expert3": str                       # Optional: Default "None"
+  "experts": List[str]                 # Optional: Defaults to ["science"]
 }
 ```
 

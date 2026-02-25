@@ -71,7 +71,7 @@ This document is designed to help you **explain this project in interviews** –
     - Accepts a `ChatRequest` body with:
       - `question: str`
       - `history: List[Message]`
-      - `expert1`, `expert2`, `expert3`: expert labels (e.g. “Science”, “Mathematics”).
+      - `experts: List[str]`: expert labels (e.g. `["Science", "Mathematics"]`).
 
 - **Flow inside `/stream` (LangGraph‑based)**
   1. Build an initial state `{ question, history, expert_list }`.
@@ -137,9 +137,7 @@ You also have a **Bring Your Own Data** (BYOD) flow that turns user documents in
   - Contains:
     - `question: str`
     - `history: Optional[List[Message]] = []`
-    - `expert1: Optional[str] = "science"`
-    - `expert2: Optional[str] = "None"`
-    - `expert3: Optional[str] = "None"`
+    - `experts: List[str] = ["science"]`
 
 - **Talking point**
   - Using **Pydantic** gives you:
@@ -229,36 +227,53 @@ These functions show you understand **compositional LLM workflows** (chat + summ
 
 ---
 
-### 5. Frontend & Streaming Client – `ui.py`
+### 5. Frontend & Streaming Client – React SPA
 
-`ui.py` is a **Streamlit** client that talks to the FastAPI backend.
+The primary client is a **Vite + React** single-page app in `Frontend/src/App.jsx` that talks to the FastAPI backend.
 
 - **Page state**
   - Maintains:
-    - `st.session_state.messages`: chat history.
-    - `st.session_state.page`: `"welcome"` vs `"chat"`.
-    - Expert names (`e1`, `e2`, `e3`).
+    - `messages`: chat history for the Experts council mode.
+    - `llmHistory`: history actually sent to the backend.
+    - `experts: string[]`: dynamic list of expert labels (defaults to three, user can add more).
+    - Separate state for BYOD chat and upload (BYOD mode).
+    - State for voice recording and vision (image) uploads.
 
 - **Welcome screen**
-  - Lets the user pick labels for three experts (e.g. “Science”, “Mathematics”).
+  - “How would you like to chat?” choice:
+    - **Experts council** mode (multi‑expert chat).
+    - **Your documents (BYOD)** mode (RAG over uploaded docs).
+  - Experts setup form:
+    - Renders one input per expert in the `experts` array.
+    - Includes a **“+ Add expert”** button to add more experts dynamically.
 
-- **Chat screen**
-  - Renders history with simple left/right bubble styling.
-  - On `Send`:
-    - Adds user message to `messages`.
-    - Sends a `POST` to `http://127.0.0.1:8000/api/v1/ask/stream` with:
-      - `question`
-      - `history` (the current messages)
-      - `expert1/2/3` (chosen expert labels).
-    - Consumes the streaming response in a loop:
-      - `response.iter_content(chunk_size=None)`.
-      - Updates a placeholder to simulate **streaming text** in the UI.
-    - Finally appends a combined `"assistant"` message to history.
+- **Experts chat screen**
+  - Shows expert chips for all non‑`"None"` experts.
+  - Renders history with user/assistant/system bubbles and per‑expert labels.
+  - Input bar:
+    - Text input bound to `input`.
+    - File input for attaching an image (vision questions).
+    - Single **Send** button:
+      - If an image is attached → calls `/api/v1/ask/vision-query`.
+      - Otherwise → calls `/api/v1/ask/stream`.
+  - Streaming handling:
+    - Reads the NDJSON stream from the backend.
+    - Ignores router‑only messages (`expert === "Router"`).
+    - Maintains a single assistant bubble per turn and appends token chunks as they arrive.
+
+- **BYOD chat screen**
+  - Provides an upload card that posts to `/api/v1/ask/byod`.
+  - After ingestion, BYOD chat sends text questions to `/api/v1/ask/byod-chat` and streams RAG answers.
+
+- **Voice input**
+  - Uses the browser `MediaRecorder` API to capture audio.
+  - Sends audio + `meta` (history + experts) to `/api/v1/ask/voice-query`.
+  - Handles the initial `"transcript"` event and then streams expert responses like `/ask/stream`.
 
 **Interview angle:**
 - You can explain both sides of streaming:
-  - **Server**: generator + `StreamingResponse`.
-  - **Client**: incremental rendering as chunks arrive.
+  - **Server**: generator + `StreamingResponse` emitting NDJSON lines.
+  - **Client**: `ReadableStream` reader that incrementally decodes lines and updates React state to render streaming text.
 
 ---
 
