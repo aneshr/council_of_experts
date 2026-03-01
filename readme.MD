@@ -5,6 +5,7 @@ A FastAPI‑based backend and a modern React frontend for an **“experts counci
 - Route questions to the most relevant expert.
 - Stream expert answers token‑by‑token to the client.
 - Ingest user documents into a FAISS index and answer questions with **RAG**.
+- Run a **deep reasoning** flow (plan → solve → review) with optional revision loops and streaming.
 
 ## 📋 Table of Contents
 
@@ -37,9 +38,13 @@ This project implements:
    - `/api/v1/ask/byod-chat` uses a LangGraph‑backed RAG graph (`rag_chat_app`) to retrieve relevant chunks and stream **context‑grounded** answers.
 4. **Vision chat (images)** (`/api/v1/ask/vision-query`)
    - Accepts an image plus optional text, runs a local **LLaVA** model via Ollama to summarize/analyze the image, then feeds that summary into the same LangGraph router graph used for text chat.
-5. **React frontend (Vite)**
+5. **Deep Reasoning chat** (`/api/v1/ask/deep-reasoning-chat`)
+   - A LangGraph graph (`deep_reasoning_app`) runs **plan → solver → reviewer → final_answer**.
+   - The reviewer can request a revision (REVISION_NEEDED), looping back to plan up to `MAX_REVISION_LOOPS` times; prior plan/answer/verdict are passed into the next round so the LLM can improve.
+   - Streams response with `phase` (plan, solver, reviewer, final_answer) so the frontend can show thinking briefly then only the final answer.
+6. **React frontend (Vite)**
    - Located under `Frontend/`.
-   - Provides a polished “Experts council” panel chat and a full BYOD upload + RAG chat UI.
+   - Provides a polished “Experts council” chat, BYOD upload + RAG chat, and **Deep Reasoning** chat (plan/solve/review with thinking preview that fades out).
    - Consumes the streaming endpoints and renders tokens as they arrive.
 
 ## 🏗️ Architecture
@@ -63,6 +68,7 @@ This project implements:
 │  │ app/routes/chat.py                     │ │
 │  │  - /ask/stream, /ask/voice-query       │ │
 │  │  - /ask/byod, /ask/byod-chat           │ │
+│  │  - /ask/deep-reasoning-chat            │ │
 │  └───────────────────────┬────────────────┘ │
 │                          │                  │
 │  ┌───────────────────────▼────────────────┐ │
@@ -74,7 +80,11 @@ This project implements:
 │  ┌───────────────────────▼────────────────┐ │
 │  │ app/graph/rag.py                      │ │
 │  │  - LangGraph RAG chat graph           │ │
-│  │  - (optional) ingest graph            │ │
+│  └───────────────────────┬────────────────┘ │
+│  ┌───────────────────────▼────────────────┐ │
+│  │ app/graph/deep_reasoning.py            │ │
+│  │  - Plan → solver → reviewer → final   │ │
+│  │  - Revision loop + revision_attempts   │ │
 │  └───────────────────────┬────────────────┘ │
 │                          │                  │
 │  ┌───────────────────────▼────────────────┐ │
@@ -237,6 +247,7 @@ By default Vite will start on `http://localhost:5173` or `http://localhost:5174`
 - Streams from `http://127.0.0.1:8000/api/v1/ask/stream` for the **Experts council** chat.
 - Ingests documents via `http://127.0.0.1:8000/api/v1/ask/byod`.
 - Runs RAG chat via `http://127.0.0.1:8000/api/v1/ask/byod-chat`.
+- Runs Deep Reasoning chat via `http://127.0.0.1:8000/api/v1/ask/deep-reasoning-chat`.
 - Sends voice queries via `http://127.0.0.1:8000/api/v1/ask/voice-query`.
 
 Ensure the backend server is running before starting the frontend.
@@ -457,6 +468,34 @@ curl -X POST "http://localhost:8000/api/v1/ask/stream" \
   }'
 ```
 
+### 7. Deep Reasoning Chat
+
+**POST** `/api/v1/ask/deep-reasoning-chat`
+
+Runs a **plan → solve → review → final answer** flow with optional revision loops. Best for complex or multi-step questions.
+
+**Request Body (same `ChatRequest` shape, no `experts`):**
+
+```json
+{
+  "question": "What is my name?",
+  "history": []
+}
+```
+
+**Response format:**
+
+Newline-delimited JSON. Each line includes a `phase` so the client can show "thinking" (plan/solver/reviewer) briefly and only the final answer persistently:
+
+- `phase`: One of `"plan"`, `"solver"`, `"reviewer"`, `"final_answer"` (from LangGraph node name).
+- `content`: Token chunk from that node.
+- Final line: `{"event": "end"}`.
+
+**Safeguards:**
+
+- Revision loop is capped at `MAX_REVISION_LOOPS` (default 2) to prevent infinite loops.
+- Prior plan/answer/verdict from each revision are stored in state (`revision_attempts`) and passed into the next plan and solver so the LLM can improve.
+
 ## 📝 Request/Response Formats
 
 ### ChatRequest Model
@@ -497,7 +536,8 @@ chat_app/
 │   ├── main.py              # FastAPI app initialization, CORS config
 │   ├── graph/
 │   │   ├── __init__.py      # router_chat graph wiring (LangGraph)
-│   │   └── rag.py           # RAG LangGraph graphs (chat + ingest)
+│   │   ├── rag.py           # RAG LangGraph graph (byod-chat)
+│   │   └── deep_reasoning.py # Deep reasoning graph (plan → solve → review → final)
 │   └── routes/
 │       ├── __init__.py
 │       └── chat.py          # Chat + BYOD endpoints (/ask/*)
@@ -526,7 +566,8 @@ chat_app/
 - **`app/main.py`**: FastAPI entry point, CORS setup, router registration.
 - **`app/routes/chat.py`**: All `/api/v1/ask/*` endpoints: streaming chat, voice query, BYOD ingest, BYOD RAG chat.
 - **`app/graph/__init__.py`** and **`app/graph/router_chat.py`**: LangGraph router graph (`router_chat_app`) that chooses experts and drives the main `/ask/stream` endpoint.
-- **`app/graph/rag.py`**: LangGraph RAG graph (`rag_chat_app`) used by `/ask/byod-chat` (and an optional ingest graph).
+- **`app/graph/rag.py`**: LangGraph RAG graph (`rag_chat_app`) used by `/ask/byod-chat`.
+- **`app/graph/deep_reasoning.py`**: LangGraph deep reasoning graph (`deep_reasoning_app`) used by `/ask/deep-reasoning-chat`: plan → solver → reviewer → final_answer, with revision loop (capped), `revision_attempts` passed back to plan/solver.
 - **`models/chat_models.py`**: Pydantic models for `Message` and `ChatRequest`.
 - **`utils/helper.py`**: Core LLM helpers:
   - `initialize_llm()` – Creates the Ollama chat client.
@@ -537,6 +578,7 @@ chat_app/
 - **`Frontend/src/App.jsx`**: React SPA that:
   - Streams multi‑expert answers from `/api/v1/ask/stream`.
   - Provides BYOD upload and RAG chat flows.
+  - Provides Deep Reasoning chat (thinking preview that fades, then final answer only) from `/api/v1/ask/deep-reasoning-chat`.
   - Sends voice queries to `/api/v1/ask/voice-query`.
 
 ## 📚 Dependencies
@@ -682,4 +724,4 @@ For issues or questions, please open an issue in the repository or contact the d
 
 ---
 
-**Last Updated:** February 2026
+**Last Updated:** March 2026

@@ -26,6 +26,7 @@ This document is designed to help you **explain this project in interviews** –
   - **LangGraph** for orchestrating flows as explicit state machines:
     - `router_chat_app` (expert router graph).
     - `rag_chat_app` (RAG answer graph).
+    - `deep_reasoning_app` (plan → solve → review → final answer, with revision loop).
   - Local LLM + embeddings served by **Ollama** (e.g. `gemma2:2b` for chat, `nomic-embed-text` for embeddings).
   - **FAISS** (via LangChain) as the on-disk vector store for Retrieval‑Augmented Generation (RAG).
 
@@ -33,6 +34,7 @@ This document is designed to help you **explain this project in interviews** –
   - **Vite + React** SPA in `Frontend/`:
     - “Experts council” chat that streams expert responses from `/api/v1/ask/stream`.
     - “Your documents (BYOD)” mode for upload + RAG chat over ingested docs.
+    - “Deep Reasoning” mode that streams from `/api/v1/ask/deep-reasoning-chat` (plan/solve/review; thinking preview fades, then only final answer).
     - Voice query button that records audio and calls `/api/v1/ask/voice-query`.
   - (Legacy prototypes: some Streamlit UIs still exist in `tempfilese/`, but the main UI is now React.)
 
@@ -115,11 +117,17 @@ You also have a **Bring Your Own Data** (BYOD) flow that turns user documents in
        - `{"content": "<token_chunk>"}` …
        - Final `{"event": "end"}`.
 
+- `POST /api/v1/ask/deep-reasoning-chat`
+  - Deep reasoning endpoint. Same `ChatRequest` body (`question`, `history`; no `experts`).
+  - LangGraph `deep_reasoning_app` (`app/graph/deep_reasoning.py`) runs **plan → solver → reviewer → final_answer**. The reviewer can output REVISION_NEEDED; the graph then loops back to plan (capped at `MAX_REVISION_LOOPS`, default 2). Prior plan/answer/verdict are stored in `revision_attempts` and passed into the next plan and solver so the LLM can improve. Streamed NDJSON includes `phase` (plan, solver, reviewer, final_answer) and `content` so the frontend can show “thinking” briefly then only the final answer.
+  - **Safeguard:** Revision loop is capped to prevent infinite loops.
+
 **Interview angle:**
 
-- You can now describe **two parallel flows**:
+- You can now describe **three parallel flows**:
   - Expert‑routed chat over general knowledge (`/stream`).
   - RAG‑based chat grounded in user documents (`/byod` + `/byod-chat`).
+  - Deep reasoning for complex questions (plan → solve → review, with revision context passed back).
 - Emphasize that:
   - Embeddings are computed **once at ingestion time**.
   - Query-time retrieval is very fast thanks to FAISS.
@@ -390,13 +398,22 @@ Points you can hit:
 
 You can position this as “I built a **local RAG system** using FAISS and Ollama, on top of my existing expert‑routing chat backend.”
 
-#### 7.6 “How does voice input work?”
+#### 7.6 “How does the deep reasoning flow work?”
+
+- **Graph:** `deep_reasoning_app` in `app/graph/deep_reasoning.py`: **plan** → **solver** → **reviewer** → conditional edge → **plan** (if REVISION_NEEDED) or **final_answer**.
+- **Plan node:** Produces a structured plan (steps, assumptions, checks). If `revision_attempts` is non-empty, the prompt includes the full prior plan(s) and answer(s) so the LLM can improve.
+- **Solver node:** Answers the question using the plan (and revision context). Output is kept in `answer_chunks`.
+- **Reviewer node:** Decides FINAL_ANSWER or REVISION_NEEDED. If REVISION_NEEDED, we append the current plan/answer/verdict to `revision_attempts` and increment `review_loop_count`; we do **not** overwrite `answer_chunks` so the final node still has the solver text.
+- **Safeguard:** `review_needed_edge` and the reviewer both enforce `MAX_REVISION_LOOPS` (default 2) so we never loop more than twice; after that we always go to final_answer.
+- **Streaming:** The route tags each chunk with `phase` from LangGraph metadata (`langgraph_node`) so the client can show plan/solver/reviewer briefly and only the final_answer persistently.
+
+#### 7.7 “How does voice input work?”
 
 - **Endpoint**: `POST /api/v1/ask/voice-query` with multipart form: `audio` file + `meta` (JSON with history and expert labels).
 - **Pipeline**: Uploaded audio is converted to WAV (using `pydub`) so Whisper can process it. The backend uses the same **Whisper small** model (lazy-loaded in `utils/helper.py`) to transcribe. The transcript becomes the “question” fed into the existing router and expert chain; the response is streamed in the same JSON-lines format as `/stream`, with an initial `transcript` event so the UI can show the recognized text.
 - **Interview angle**: You can explain end-to-end multimodal input (audio → text → LLM → streamed text) and reuse of the same routing and streaming logic for both text and voice.
 
-#### 7.7 “What would you improve if you had more time?”
+#### 7.8 “What would you improve if you had more time?”
 
 You can pick several:
 
@@ -437,12 +454,12 @@ If you’re short on time, focus on: **routing concept + streaming implementatio
 
 - **Core idea**: Multi‑expert chat with LLM router, streaming responses; optional voice input and BYOD RAG.
 - **Backend**: FastAPI + LangChain + Ollama; `app/main.py`, `app/routes/chat.py`, `utils/helper.py`, `models/chat_models.py`, `utils/rag.py`.
-- **Endpoints**: `/ask/` (health), `/ask/stream` (text chat), `/ask/voice-query` (audio → Whisper → same router/expert stream), `/ask/byod` (ingest docs), `/ask/byod-chat` (RAG over ingested docs).
+- **Endpoints**: `/ask/` (health), `/ask/stream` (text chat), `/ask/voice-query` (audio → Whisper → same router/expert stream), `/ask/byod` (ingest docs), `/ask/byod-chat` (RAG over ingested docs), `/ask/deep-reasoning-chat` (plan → solve → review with revision loop and phase tagging).
 - **Routing**: `router_expert` builds a prompt that forces the LLM to return a **single expert name**.
 - **Streaming**: `stream_llm_response` (LangChain stream) → generator → `StreamingResponse` → client.
 - **Voice**: Audio → pydub (WAV) → Whisper (small) → transcript as question → same flow as `/stream`; first stream line is `transcript` event.
 - **Client**: Streamlit (`ui.py`) calls `/api/v1/ask/stream` and renders the stream; could be swapped for a React frontend.
-- **Extras**: BYOD RAG (FAISS + Ollama embeddings), STT/TTS demos and richer Streamlit prototype in `chat_llm.py`.
+- **Extras**: BYOD RAG (FAISS + Ollama embeddings); Deep Reasoning graph (plan/solver/reviewer, revision_attempts, MAX_REVISION_LOOPS); STT/TTS demos and richer Streamlit prototype in `chat_llm.py`.
 
 Use this document as a mental map: for any interview question, try to anchor your answer to one of these sections and file names.
 

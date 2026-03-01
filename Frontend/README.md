@@ -1,6 +1,6 @@
 # React + Vite
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+This frontend provides the chat app UI: **Experts council** (routed multi-expert chat), **Your documents (BYOD)** (RAG over uploaded docs), and **Deep Reasoning** (plan → solve → review with a brief thinking preview that fades to the final answer). It is built with Vite + React and consumes the FastAPI streaming endpoints.
 
 Currently, two official plugins are available:
 

@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import "./index.css";
+import { ExpertCouncilIcon } from "./ExpertCouncilIcon";
 
 export default function App() {
   const [page, setPage] = useState("welcome");
@@ -24,6 +25,12 @@ export default function App() {
   const [byodUploadCollapsed, setByodUploadCollapsed] = useState(false);
   const [byodDragOver, setByodDragOver] = useState(false);
   const [byodUploadFeedback, setByodUploadFeedback] = useState(null); // { type: 'success'|'error', message }
+
+  // Deep Reasoning chat state
+  const [deepReasoningMessages, setDeepReasoningMessages] = useState([]);
+  const [deepReasoningHistory, setDeepReasoningHistory] = useState([]);
+  const [deepReasoningInput, setDeepReasoningInput] = useState("");
+  const [deepReasoningLoading, setDeepReasoningLoading] = useState(false);
 
   // Vision (image) questions in expert chat
   const [visionFile, setVisionFile] = useState(null);
@@ -62,7 +69,7 @@ export default function App() {
     if (scrollAnchorRef.current) {
       scrollAnchorRef.current.scrollIntoView({ behavior: "auto" });
     }
-  }, [messages, byodMessages, page]);
+  }, [messages, byodMessages, deepReasoningMessages, page]);
 
   /* ---------------- send message ---------------- */
 
@@ -573,6 +580,156 @@ export default function App() {
     }
   }
 
+  /* ---------------- Deep Reasoning chat ---------------- */
+
+  async function sendDeepReasoningMessage() {
+    const trimmed = deepReasoningInput.trim();
+    if (!trimmed) return;
+
+    setDeepReasoningMessages(prev => [
+      ...prev,
+      { role: "user", content: trimmed, justSent: true }
+    ]);
+    setDeepReasoningInput("");
+    setDeepReasoningLoading(true);
+
+    const nextHistory = [...deepReasoningHistory, { role: "user", content: trimmed }];
+    setDeepReasoningHistory(nextHistory);
+
+    const turnId = Date.now();
+    let finalAnswerBuffer = "";
+    let hidePlanTimer = null;
+
+    try {
+      const res = await fetch("http://127.0.0.1:8000/api/v1/ask/deep-reasoning-chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: trimmed,
+          history: nextHistory
+        })
+      });
+
+      if (!res.body) throw new Error("No stream");
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let unlocked = false;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+
+          let data;
+          try {
+            data = JSON.parse(line);
+          } catch {
+            console.warn("Bad Deep Reasoning JSON line:", line);
+            continue;
+          }
+
+          if (data.event === "end") continue;
+
+          const content = data.content ?? "";
+          const phase = (data.phase || "answer").toLowerCase();
+          if (!content) continue;
+
+          const isFinalPhase = phase === "final_answer";
+
+          if (isFinalPhase) {
+            finalAnswerBuffer += content;
+          }
+
+          if (!unlocked) {
+            setDeepReasoningLoading(false);
+            unlocked = true;
+          }
+
+          setDeepReasoningMessages(prev => {
+            const copy = [...prev];
+            let last = copy[copy.length - 1];
+            if (last && last.role === "assistant") {
+              if (isFinalPhase) {
+                const next = {
+                  ...last,
+                  content: (last.content || "") + content,
+                  turnId: last.turnId ?? turnId
+                };
+                if (next.hidePlanAt == null) {
+                  next.hidePlanAt = Date.now() + 3000;
+                  next.showPlan = true;
+                  if (hidePlanTimer) clearTimeout(hidePlanTimer);
+                  const idToHide = turnId;
+                  hidePlanTimer = setTimeout(() => {
+                    setDeepReasoningMessages(prev2 =>
+                      prev2.map(m =>
+                        m.role === "assistant" && m.turnId === idToHide && m.showPlan
+                          ? { ...m, planFadingOut: true }
+                          : m
+                      )
+                    );
+                  }, 2500);
+                }
+                copy[copy.length - 1] = next;
+              } else {
+                copy[copy.length - 1] = {
+                  ...last,
+                  planContent: (last.planContent || "") + content,
+                  content: last.content ?? "",
+                  showPlan: true,
+                  turnId: last.turnId ?? turnId
+                };
+              }
+            } else {
+              copy.push({
+                role: "assistant",
+                turnId,
+                planContent: isFinalPhase ? "" : content,
+                content: isFinalPhase ? content : "",
+                showPlan: true,
+                hidePlanAt: isFinalPhase ? Date.now() + 3000 : null
+              });
+              if (isFinalPhase) {
+                if (hidePlanTimer) clearTimeout(hidePlanTimer);
+                const idToHide = turnId;
+                hidePlanTimer = setTimeout(() => {
+                  setDeepReasoningMessages(prev2 =>
+                    prev2.map(m =>
+                      m.role === "assistant" && m.turnId === idToHide && m.showPlan
+                        ? { ...m, planFadingOut: true }
+                        : m
+                    )
+                  );
+                }, 2500);
+              }
+            }
+            return copy;
+          });
+        }
+      }
+
+      if (finalAnswerBuffer.trim()) {
+        setDeepReasoningHistory(prev => [
+          ...prev,
+          { role: "assistant", content: finalAnswerBuffer }
+        ]);
+      }
+    } catch (err) {
+      console.error("Deep Reasoning stream error:", err);
+      setDeepReasoningLoading(false);
+    } finally {
+      if (hidePlanTimer) clearTimeout(hidePlanTimer);
+    }
+  }
+
   /* ---------------- audio recording input ---------------- */
 
   async function startRecording() {
@@ -811,10 +968,15 @@ export default function App() {
       return (
         <div className="welcome-screen">
           <div className="welcome-choose">
-            <h1 className="welcome-choose-title">How would you like to chat?</h1>
-            <p className="welcome-choose-subtitle">
-              Pick a mode below to get started.
-            </p>
+            <div className="welcome-hero">
+              <div className="welcome-logo-ring">
+                <ExpertCouncilIcon className="welcome-logo" />
+              </div>
+              <h1 className="welcome-choose-title">How would you like to chat?</h1>
+              <p className="welcome-choose-subtitle">
+                Pick a mode below to get started.
+              </p>
+            </div>
             <div className="welcome-cards">
               <button
                 type="button"
@@ -847,6 +1009,25 @@ export default function App() {
                 <p>
                   Upload your own docs and ask questions with RAG. One ingest,
                   then chat.
+                </p>
+                <span className="welcome-mode-cta">Continue →</span>
+              </button>
+              <button
+                type="button"
+                className="welcome-mode-card"
+                onClick={() => {
+                  window.history.pushState({}, "", "#deep-reasoning");
+                  setDeepReasoningMessages([]);
+                  setDeepReasoningHistory([]);
+                  setDeepReasoningInput("");
+                  setPage("deepReasoning");
+                }}
+              >
+                <span className="welcome-mode-icon" aria-hidden>🧠</span>
+                <h2>Deep Reasoning</h2>
+                <p>
+                  Plan, solve, and review step by step. Best for complex
+                  questions that need structured thinking.
                 </p>
                 <span className="welcome-mode-cta">Continue →</span>
               </button>
@@ -1136,6 +1317,124 @@ export default function App() {
     );
   }
 
+  /* ---------------- Deep Reasoning chat UI ---------------- */
+
+  if (page === "deepReasoning") {
+    return (
+      <div className="app-shell">
+        <header className="top-nav">
+          <button
+            className="back-btn"
+            onClick={() => {
+              window.history.pushState({}, "", "#");
+              setPage("welcome");
+              setDeepReasoningMessages([]);
+              setDeepReasoningHistory([]);
+              setDeepReasoningInput("");
+            }}
+          >
+            ← Back to start
+          </button>
+          <span className="nav-title">Deep Reasoning</span>
+        </header>
+
+        <main className="chat-layout">
+          <section className="chat-container">
+            <div className="chat-header">
+              <div>
+                <h2>Plan, solve, and review</h2>
+                <p className="chat-subtitle">
+                  Ask complex questions. The assistant will plan steps, solve step by step,
+                  and optionally review and refine the answer.
+                </p>
+              </div>
+            </div>
+
+            <div
+              ref={messagesRef}
+              className="messages"
+              role="log"
+              aria-live="polite"
+            >
+              <div className="messages-inner">
+                {deepReasoningMessages.map((m, i) => (
+                  <div
+                    key={`${m.role}-dr-${i}`}
+                    className={`bubble ${
+                      m.role === "system" ? "assistant" : m.role
+                    } ${m.justSent ? "just-sent" : ""}`}
+                  >
+                    {m.role === "assistant" && (m.showPlan || m.planFadingOut) && (m.planContent || "").trim() ? (
+                      <>
+                        <div
+                          className={`bubble-content bubble-plan-preview${m.planFadingOut ? " bubble-plan-preview--hiding" : ""}`}
+                          aria-live="polite"
+                          onAnimationEnd={e => {
+                            if (e.animationName === "bubble-plan-fade-out" && m.planFadingOut) {
+                              setDeepReasoningMessages(prev =>
+                                prev.map(msg =>
+                                  msg.role === "assistant" && msg.turnId === m.turnId && msg.planFadingOut
+                                    ? { ...msg, showPlan: false, planFadingOut: false }
+                                    : msg
+                                )
+                              );
+                            }
+                          }}
+                        >
+                          {m.planContent}
+                        </div>
+                        <div className="bubble-content">
+                          {(m.content || "").trim() ? m.content : "…"}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="bubble-content">
+                        {m.role === "assistant"
+                          ? (m.content || "").trim() || "…"
+                          : m.content}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <div
+                  ref={scrollAnchorRef}
+                  className="scroll-anchor"
+                  aria-hidden="true"
+                />
+              </div>
+            </div>
+
+            <div className="chat-footer">
+              <div className="input-area">
+                <input
+                  type="text"
+                  value={deepReasoningInput}
+                  onChange={e => setDeepReasoningInput(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && sendDeepReasoningMessage()}
+                  placeholder={
+                    deepReasoningLoading
+                      ? "Planning and solving..."
+                      : "Ask a complex question..."
+                  }
+                  disabled={deepReasoningLoading}
+                />
+                <button
+                  onClick={sendDeepReasoningMessage}
+                  disabled={deepReasoningLoading || !deepReasoningInput.trim()}
+                >
+                  {deepReasoningLoading ? "Thinking…" : "Send"}
+                </button>
+              </div>
+              <p className="chat-hint">
+                Best for multi-step or analytical questions.
+              </p>
+            </div>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
   /* ---------------- chat UI ---------------- */
 
   return (
@@ -1210,10 +1509,23 @@ export default function App() {
               <div className="attachment-controls">
                 <input
                   ref={visionFileInputRef}
+                  id="chat-vision-upload"
+                  className="attachment-input-hidden"
                   type="file"
                   accept="image/*"
                   onChange={e => setVisionFile(e.target.files?.[0] || null)}
                 />
+                <button
+                  type="button"
+                  className={`attachment-button ${visionFile ? "has-file" : ""}`}
+                  onClick={() => visionFileInputRef.current?.click()}
+                  disabled={loading}
+                >
+                  <span aria-hidden>📎</span>
+                  <span className="attachment-label">
+                    {visionFile ? "Image attached" : "Attach image"}
+                  </span>
+                </button>
               </div>
               <button
                 type="button"

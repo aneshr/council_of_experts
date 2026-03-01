@@ -9,6 +9,8 @@ This router exposes endpoints for:
 - A BYOD ingestion endpoint at `/ask/byod` that:
   * Accepts document uploads and metadata.
   * Extracts, chunks, and indexes text into a global FAISS store.
+- A deep-reasoning chat endpoint at `/ask/deep-reasoning-chat` that:
+  * Runs plan → solve → review (with optional loop) and streams the answer as JSON lines.
 """
 
 
@@ -32,6 +34,7 @@ from models.chat_models import ChatRequest
 from utils.rag import ingest_document, retrieve_context
 from app.graph import router_chat_app
 from app.graph.rag import rag_chat_app
+from app.graph.deep_reasoning import deep_reasoning_app
 import json
 import os
 print("Chat routes file:",__file__)
@@ -535,6 +538,46 @@ async def byod_chat(request: ChatRequest):
                 if getattr(msg_chunk, "content", None):
                     answer_stream_started = True
                     yield json.dumps({"content": msg_chunk.content}) + "\n"
+
+        if answer_stream_started:
+            yield json.dumps({"event": "end"}) + "\n"
+
+    return StreamingResponse(generate(), media_type="text/plain")
+
+
+@router.post("/deep-reasoning-chat")
+async def deep_reasoning_chat(request: ChatRequest):
+    """
+    Deep-reasoning chat: plan → solve → review → (loop or final answer).
+
+    Uses the same ChatRequest model (question, history). Streams the answer
+    as newline-delimited JSON lines: {"content": "<chunk>"} ... {"event": "end"}
+    """
+    question = request.question
+    history = request.history or []
+
+    initial_state = {
+        "question": question,
+        "history": history,
+    }
+
+    def generate():
+        answer_stream_started = False
+        for event in deep_reasoning_app.stream(
+            initial_state,
+            stream_mode=["messages"],
+        ):
+            if isinstance(event, tuple) and len(event) == 2:
+                mode, chunk = event
+            else:
+                continue
+
+            if mode == "messages":
+                msg_chunk, metadata = chunk
+                if getattr(msg_chunk, "content", None):
+                    answer_stream_started = True
+                    phase = (metadata or {}).get("langgraph_node", "answer")
+                    yield json.dumps({"phase": phase, "content": msg_chunk.content}) + "\n"
 
         if answer_stream_started:
             yield json.dumps({"event": "end"}) + "\n"
