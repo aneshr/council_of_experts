@@ -31,8 +31,10 @@
       border-radius: 12px;
       padding: 24px;
       box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
-      max-width: 1200px;
-      overflow: auto;
+      max-width: 100%;
+      min-width: min(100%, 1400px);
+      overflow-x: auto;
+      overflow-y: hidden;
     }
     .mermaid { text-align: center; }
     code { font-size: 0.8rem; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; }
@@ -48,7 +50,7 @@
   </p>
   <div class="diagram-wrap">
     <pre class="mermaid">
-flowchart TD
+flowchart LR
   Frontend["Frontend UI"] -->|"HTTP NDJSON"| API["FastAPI (/api/v1/ask)"]
   API --> StreamEndpoint["/stream"]
   StreamEndpoint --> RouterGraph["LangGraph router_chat_app"]

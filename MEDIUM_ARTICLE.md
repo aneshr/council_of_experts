@@ -41,7 +41,7 @@ The system has a few “lanes” that reuse the same core ideas:
 > Medium doesn’t reliably render Mermaid diagrams. Best approach: render this diagram as an image (screenshot from your editor) and upload the image into the Medium post.
 
 ```mermaid
-flowchart TD
+flowchart LR
   Frontend["Frontend UI"] -->|"HTTP NDJSON"| API["FastAPI (/api/v1/ask)"]
   API --> StreamEndpoint["/stream"]
   StreamEndpoint --> RouterGraph["LangGraph router_chat_app"]
@@ -60,8 +60,8 @@ flowchart TD
   Retrieve --> RagGraph["LangGraph rag_chat_app"]
   RagGraph -->|"messages"| RagTokens["RAG token stream"]
   ByodChatEndpoint -->|"tabular (auto/excel)"| PandasAI["PandasAI SmartDataframe"]
-  PandasAI --> Plots["rag_store/plots/<doc_id>"]
-  API --> PlotServe["/plots/{doc_id}/{filename}"]
+  PandasAI --> Plots["rag_store/plots per doc_id"]
+  API --> PlotServe["GET /plots/doc_id/filename"]
 ```
 
 ---
@@ -121,7 +121,7 @@ Streaming is still first-class: the API streams tokens as NDJSON, but includes a
 > Same as the main architecture diagram: Medium may not render Mermaid reliably—export this block as an image (e.g. from `docs/architecture_diagram_for_medium.html` or any Mermaid renderer) and upload it into your Medium post.
 
 ```mermaid
-flowchart TD
+flowchart LR
   subgraph Request["Deep reasoning request"]
     Client["Frontend UI"]
     Endpoint["POST /api/v1/ask/deep-reasoning-chat"]
