@@ -47,6 +47,9 @@ flowchart TD
   StreamEndpoint --> RouterGraph["LangGraph router_chat_app"]
   RouterGraph -->|"updates"| Updates["chosen_expert or fallback"]
   RouterGraph -->|"messages"| ExpertTokens["expert token stream"]
+  API --> DeepReasoningEndpoint["/deep-reasoning-chat"]
+  DeepReasoningEndpoint --> DeepReasoningGraph["LangGraph deep_reasoning_app"]
+  DeepReasoningGraph -->|"messages (phase-tagged)"| DeepTokens["plan → solve → review → final"]
   API --> ByodEndpoint["/byod"]
   ByodEndpoint --> Extract["extract_text_by_type"]
   Extract --> Chunk["chunk_with_overlap"]
@@ -102,7 +105,22 @@ This pattern scales well: adding experts is mostly prompt/design work, not a rew
 
 ---
 
-## 3) BYOD ingestion: the RAG foundation
+## 3) Deep reasoning: plan → solve → review (with revision loops)
+
+Some questions aren’t best handled by “answer immediately.” For multi-step problems, this project includes a **deep reasoning** flow exposed as `/api/v1/ask/deep-reasoning-chat`.
+
+Instead of a single generation pass, it runs a small graph:
+
+- **plan**: create an approach
+- **solve**: produce an answer using the plan
+- **review**: critique the answer and decide whether a revision is needed
+- **final**: return the final response (or loop back up to a capped number of revisions)
+
+Streaming is still first-class: the API streams tokens as NDJSON, but includes a **`phase`** so the UI can show “thinking” briefly and keep only the final answer if desired.
+
+---
+
+## 4) BYOD ingestion: the RAG foundation
 
 For BYOD, I wanted a pipeline that is easy to reason about and persists across restarts:
 
@@ -118,7 +136,7 @@ Why persistence matters: you can ingest once and reuse the index without rebuild
 
 ---
 
-## 4) RAG chat: retrieval + lightweight citations + streaming
+## 5) RAG chat: retrieval + lightweight citations + streaming
 
 Once the index exists, `/byod-chat` retrieves top‑k chunks, formats them into a context block with labels, then streams the answer from a RAG graph.
 
@@ -131,7 +149,7 @@ This separation also makes iteration easier:
 
 ---
 
-## 5) Why spreadsheets need a separate path (“Excel mode”)
+## 6) Why spreadsheets need a separate path (“Excel mode”)
 
 A spreadsheet isn’t a document in the “read and quote paragraphs” sense—it’s a dataset. Many spreadsheet questions are about:
 
@@ -146,7 +164,7 @@ When charts aren’t produced, a lightweight fallback plot generator can still c
 
 ---
 
-## 6) Bonus: voice + vision (optional)
+## 7) Bonus: voice + vision (optional)
 
 Multimodal inputs work best when you reuse the same routing + streaming core after converting inputs into text:
 
@@ -157,7 +175,7 @@ This keeps the system modular: “input adapters” (Whisper, LLaVA) feed the sa
 
 ---
 
-## 7) What I’d improve next
+## 8) What I’d improve next
 
 - **Chunking**: token‑aware or semantic chunking; tune overlap; handle headings/sections.
 - **Scoped retrieval**: filter by `doc_id` / tags so retrieval isn’t global.
