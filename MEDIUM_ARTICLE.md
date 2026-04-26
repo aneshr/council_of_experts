@@ -118,6 +118,26 @@ Instead of a single generation pass, it runs a small graph:
 
 Streaming is still first-class: the API streams tokens as NDJSON, but includes a **`phase`** so the UI can show “thinking” briefly and keep only the final answer if desired.
 
+> Same as the main architecture diagram: Medium may not render Mermaid reliably—export this block as an image (e.g. from `docs/architecture_diagram_for_medium.html` or any Mermaid renderer) and upload it into your Medium post.
+
+```mermaid
+flowchart TD
+  subgraph Request["Deep reasoning request"]
+    Client["Frontend UI"]
+    Endpoint["POST /api/v1/ask/deep-reasoning-chat"]
+    Client --> Endpoint
+  end
+  Endpoint --> Graph["LangGraph deep_reasoning_app"]
+  Graph --> Plan["plan"]
+  Plan --> Solver["solver"]
+  Solver --> Reviewer["reviewer"]
+  Reviewer --> Decision{"revision needed?"}
+  Decision -->|"yes (capped loop)"| Plan
+  Decision -->|"no"| FinalAnswer["final_answer"]
+  Graph --> Stream["NDJSON stream: phase + content tokens"]
+  FinalAnswer --> Stream
+```
+
 ---
 
 ## 4) BYOD ingestion: the RAG foundation
