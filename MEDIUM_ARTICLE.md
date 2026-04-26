@@ -42,27 +42,23 @@ The system has a few “lanes” that reuse the same core ideas:
 
 ```mermaid
 flowchart TD
-  Frontend[Frontend_UI] -->|HTTP_NDJSON| API[FastAPI_/api_v1_ask]
-
-  API --> Stream[/stream]
-  Stream --> RouterGraph[LangGraph_router_chat_app]
-  RouterGraph -->|updates| Updates[chosen_expert_or_fallback]
-  RouterGraph -->|messages| ExpertTokens[token_stream]
-
-  API --> Byod[/byod]
-  Byod --> Extract[extract_text_by_type]
-  Extract --> Chunk[chunk_with_overlap]
-  Chunk --> Embed[OllamaEmbeddings_nomic_embed_text]
-  Embed --> Faiss[FAISS_index_save_local]
-
-  API --> ByodChat[/byod-chat]
-  ByodChat -->|text_docs| Retrieve[FAISS_similarity_search_topK]
-  Retrieve --> RagGraph[LangGraph_rag_chat_app]
-  RagGraph -->|messages| RagTokens[token_stream]
-
-  ByodChat -->|tabular_auto_excel| PandasAI[PandasAI_SmartDataframe]
-  PandasAI --> Plots[rag_store_plots_docId]
-  API --> PlotServe[/plots_docId_filename]
+  Frontend["Frontend UI"] -->|"HTTP NDJSON"| API["FastAPI (/api/v1/ask)"]
+  API --> StreamEndpoint["/stream"]
+  StreamEndpoint --> RouterGraph["LangGraph router_chat_app"]
+  RouterGraph -->|"updates"| Updates["chosen_expert or fallback"]
+  RouterGraph -->|"messages"| ExpertTokens["expert token stream"]
+  API --> ByodEndpoint["/byod"]
+  ByodEndpoint --> Extract["extract_text_by_type"]
+  Extract --> Chunk["chunk_with_overlap"]
+  Chunk --> Embed["OllamaEmbeddings (nomic-embed-text)"]
+  Embed --> Faiss["FAISS index (save_local)"]
+  API --> ByodChatEndpoint["/byod-chat"]
+  ByodChatEndpoint -->|"text docs"| Retrieve["FAISS similarity_search (top-k)"]
+  Retrieve --> RagGraph["LangGraph rag_chat_app"]
+  RagGraph -->|"messages"| RagTokens["RAG token stream"]
+  ByodChatEndpoint -->|"tabular (auto/excel)"| PandasAI["PandasAI SmartDataframe"]
+  PandasAI --> Plots["rag_store/plots/<doc_id>"]
+  API --> PlotServe["/plots/{doc_id}/{filename}"]
 ```
 
 ---
