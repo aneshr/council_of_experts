@@ -232,13 +232,13 @@ Put these screenshots directly into the Medium post (drag-and-drop works).
   - Place it in section **“1) Streaming first…”**
 - **02 — BYOD upload success**: show the ingest response with **`doc_id`** and **`num_chunks`** visible.
   - Suggested filename: `medium_screenshots/02_byod_upload_response.png`
-  - Place it in section **“3) BYOD ingestion…”**
+  - Place it in section **“4) BYOD ingestion…”**
 - **03 — BYOD chat answer**: show the answer and (if visible) the evidence/citation formatting.
   - Suggested filename: `medium_screenshots/03_byod_chat.png`
-  - Place it in section **“4) RAG chat…”**
+  - Place it in section **“5) RAG chat…”**
 - **04 — Excel/CSV Q&A + plot (optional)**: show one plot image and the answer payload.
   - Suggested filename: `medium_screenshots/04_excel_plot.png`
-  - Place it in section **“5) Why spreadsheets…”**
+  - Place it in section **“6) Why spreadsheets…”**
 
 ### Screenshot tips (so they look good on Medium)
 
@@ -254,3 +254,18 @@ Put these screenshots directly into the Medium post (drag-and-drop works).
 - Don’t publish generated vector indexes built from private docs.
 - Double-check that no secrets/tokens appear in terminal output or screenshots.
 
+---
+
+## Tech stack (what this project runs on)
+
+- **Backend**: FastAPI, Uvicorn, Pydantic  
+- **Agents / orchestration**: LangGraph, LangChain (community integrations where needed)  
+- **Models (local-first)**: Ollama (chat + embeddings, e.g. `nomic-embed-text` for indexing)  
+- **RAG / retrieval**: FAISS (on-disk index), document extraction for PDF/DOCX/TXT/CSV/XLSX  
+- **Tabular Q&A**: pandas, PandasAI-style flows for spreadsheet questions + optional plots  
+- **Frontend**: React + Vite, streaming NDJSON consumption  
+- **Optional multimodal**: Whisper + pydub for voice; LLaVA via Ollama for vision  
+
+### Development workflow
+
+I used **Cursor** as my day-to-day editor while building this: fast repo navigation, refactors across `app/` + `utils/`, and tightening the Medium write-up and Mermaid diagrams. It’s not part of the runtime stack, but it materially sped up iteration on LangGraph flows and streaming edge cases.
