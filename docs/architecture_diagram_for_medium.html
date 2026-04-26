@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Architecture diagram — Medium export</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --fg: #0f172a;
+      --muted: #64748b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+    }
+    h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 8px; }
+    .hint {
+      font-size: 0.875rem;
+      color: var(--muted);
+      max-width: 900px;
+      line-height: 1.5;
+      margin-bottom: 20px;
+    }
+    .diagram-wrap {
+      background: #fff;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+      max-width: 1200px;
+      overflow: auto;
+    }
+    .mermaid { text-align: center; }
+    code { font-size: 0.8rem; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Architecture (for Medium)</h1>
+  <p class="hint">
+    Open this file in Chrome or Safari. If the diagram does not load (CDN blocked on <code>file://</code>),
+    run from this folder: <code>python3 -m http.server 8765</code> then visit
+    <code>http://127.0.0.1:8765/docs/architecture_diagram_for_medium.html</code>.
+    Use full-page screenshot or DevTools → Capture screenshot, then upload the PNG to Medium.
+  </p>
+  <div class="diagram-wrap">
+    <pre class="mermaid">
+flowchart TD
+  Frontend["Frontend UI"] -->|"HTTP NDJSON"| API["FastAPI (/api/v1/ask)"]
+  API --> StreamEndpoint["/stream"]
+  StreamEndpoint --> RouterGraph["LangGraph router_chat_app"]
+  RouterGraph -->|"updates"| Updates["chosen_expert or fallback"]
+  RouterGraph -->|"messages"| ExpertTokens["expert token stream"]
+  API --> DeepReasoningEndpoint["/deep-reasoning-chat"]
+  DeepReasoningEndpoint --> DeepReasoningGraph["LangGraph deep_reasoning_app"]
+  DeepReasoningGraph -->|"messages (phase-tagged)"| DeepTokens["plan → solve → review → final"]
+  API --> ByodEndpoint["/byod"]
+  ByodEndpoint --> Extract["extract_text_by_type"]
+  Extract --> Chunk["chunk_with_overlap"]
+  Chunk --> Embed["OllamaEmbeddings (nomic-embed-text)"]
+  Embed --> Faiss["FAISS index (save_local)"]
+  API --> ByodChatEndpoint["/byod-chat"]
+  ByodChatEndpoint -->|"text docs"| Retrieve["FAISS similarity_search (top-k)"]
+  Retrieve --> RagGraph["LangGraph rag_chat_app"]
+  RagGraph -->|"messages"| RagTokens["RAG token stream"]
+  ByodChatEndpoint -->|"tabular (auto/excel)"| PandasAI["PandasAI SmartDataframe"]
+  PandasAI --> Plots["rag_store/plots per doc_id"]
+  API --> PlotServe["GET /plots/doc_id/filename"]
+    </pre>
+  </div>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: "neutral",
+      flowchart: { htmlLabels: true, curve: "basis" },
+      securityLevel: "loose",
+    });
+    await mermaid.run({ querySelector: ".mermaid" });
+  </script>
+</body>
+</html>
