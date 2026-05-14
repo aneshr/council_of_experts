@@ -1,0 +1,10 @@
+# Test dependencies — use with conda env "langchain-env".
+# Install order:
+#   conda activate langchain-env
+#   pip install -r requirements-langgraph.txt
+#   pip install -r requirements-dev.txt
+-r requirements.txt
+
+pytest>=7.0.0
+pytest-cov>=4.0.0
+httpx>=0.25.0

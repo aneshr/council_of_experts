@@ -1,0 +1,22 @@
+# App
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# LangChain (pinned for compatibility with each other)
+langchain-core>=0.2.38,<0.3.0
+langchain>=0.2.0,<0.3.0
+langchain-community>=0.2.0,<0.3.0
+langchain-text-splitters>=0.2.0,<0.3.0
+
+# Optional: use only if you need OpenAI (e.g. for embeddings). Pin to match langchain-core.
+# langchain-openai>=0.2.0,<0.3.0
+
+# RAG / documents
+PyPDF2>=3.0.0
+python-docx>=1.0.0
+
+# Voice (optional)
+# openai-whisper>=20231117
+# pydub>=0.25.0
+
+# --- LangGraph: use conda env "langchain-env" and requirements-langgraph.txt ---
